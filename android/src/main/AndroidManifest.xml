@@ -2,6 +2,18 @@
   package="it.poggi.companion_device_manager">
     <uses-permission android:name="android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE" />
 
+    <!-- Bluetooth permissions are required so the system can perform the BT/BLE
+         scan that backs CompanionDeviceManager.associate(). They are merged into
+         the host app at build time, so consumers no longer need to declare them
+         manually. -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
     <uses-feature
         android:name="android.software.companion_device_setup"
         android:required="false" />

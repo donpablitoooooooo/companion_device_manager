@@ -83,8 +83,7 @@ class CompanionDeviceManagerHomePage extends StatefulWidget {
 
 class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerHomePage> {
   final CompanionDeviceManager _manager = CompanionDeviceManager();
-  final TextEditingController _addressController =
-      TextEditingController(text: 'A7:09:65:57:B7:D6');
+  final TextEditingController _addressController = TextEditingController();
   StreamSubscription<CompanionDeviceEvent>? _eventSubscription;
   String? _lastEventSignature;
 
@@ -250,14 +249,13 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
 
   Future<void> _associate() async {
     final address = _addressController.text.trim();
-    if (address.isEmpty) {
-      setState(() => _status = 'Please enter a Bluetooth MAC address.');
-      return;
-    }
+    final hasAddress = address.isNotEmpty;
 
     setState(() {
       _busy = true;
-      _status = 'Launching the Android companion device chooser...';
+      _status = hasAddress
+          ? 'Launching the Android companion device chooser for $address...'
+          : 'Scanning all nearby BLE devices. Pick yours from the system dialog...';
     });
 
     try {
@@ -265,9 +263,11 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
         CompanionDeviceAssociationRequest(
           displayName: 'Companion Device Manager Example',
           filters: <CompanionDeviceFilter>[
-            CompanionDeviceFilter.bluetoothLe(address: address),
+            CompanionDeviceFilter.bluetoothLe(
+              address: hasAddress ? address : null,
+            ),
           ],
-          singleDevice: true,
+          singleDevice: hasAddress,
         ),
       );
 
@@ -370,8 +370,11 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
                 TextField(
                   controller: _addressController,
                   decoration: const InputDecoration(
-                    labelText: 'Bluetooth MAC address',
-                    helperText: 'Use the BLE device MAC address when testing.',
+                    labelText: 'Bluetooth MAC address (optional)',
+                    helperText:
+                        'Leave empty to scan all nearby BLE devices and pick one '
+                        'from the system chooser.',
+                    helperMaxLines: 2,
                     border: OutlineInputBorder(),
                   ),
                 ),

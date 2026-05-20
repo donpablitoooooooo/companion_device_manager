@@ -23,7 +23,8 @@ The example UI contains:
 
 1. Run the example on a real Android device.
 2. Register the background callback.
-3. Enter a valid companion device Bluetooth address.
+3. Optionally enter a target Bluetooth address — leave the field empty to scan
+   all nearby BLE devices and pick one from the system chooser.
 4. Start the association flow.
 5. Complete the system chooser.
 6. Trigger the companion device event on the Android side.

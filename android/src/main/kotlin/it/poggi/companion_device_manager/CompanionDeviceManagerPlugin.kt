@@ -306,31 +306,30 @@ class CompanionDeviceManagerPlugin :
             Log.d(tag, "Processing filter type=$type")
             when (type) {
                 "bluetooth" -> {
-                    val address = filterMap["address"] as? String
-                        ?: throw IllegalArgumentException("Bluetooth filters require an address.")
-                    Log.d(tag, "Adding classic Bluetooth filter for address=$address")
-                    if (firstBluetoothAddress == null) {
+                    val address = (filterMap["address"] as? String)?.takeIf { it.isNotBlank() }
+                    Log.d(tag, "Adding classic Bluetooth filter address=${address ?: "<any>"}")
+                    if (address != null && firstBluetoothAddress == null) {
                         firstBluetoothAddress = address
                     }
-                    val filter = BluetoothDeviceFilter.Builder()
-                        .setAddress(address)
-                        .build()
-                    builder.addDeviceFilter(filter)
+                    val classicBuilder = BluetoothDeviceFilter.Builder()
+                    if (address != null) {
+                        classicBuilder.setAddress(address)
+                    }
+                    builder.addDeviceFilter(classicBuilder.build())
                 }
 
                 "bluetoothLe" -> {
-                    val address = filterMap["address"] as? String
-                        ?: throw IllegalArgumentException("Bluetooth LE filters require an address.")
-                    Log.d(tag, "Adding BLE filter for address=$address")
-                    if (firstBluetoothAddress == null) {
+                    val address = (filterMap["address"] as? String)?.takeIf { it.isNotBlank() }
+                    Log.d(tag, "Adding BLE filter address=${address ?: "<any>"}")
+                    if (address != null && firstBluetoothAddress == null) {
                         firstBluetoothAddress = address
                     }
-                    val scanFilter = ScanFilter.Builder()
-                        .setDeviceAddress(address)
-                        .build()
-                    Log.d(tag, "Created ScanFilter with address=$address")
+                    val scanFilterBuilder = ScanFilter.Builder()
+                    if (address != null) {
+                        scanFilterBuilder.setDeviceAddress(address)
+                    }
                     val filter = BluetoothLeDeviceFilter.Builder()
-                        .setScanFilter(scanFilter)
+                        .setScanFilter(scanFilterBuilder.build())
                         .build()
                     Log.d(tag, "Created BluetoothLeDeviceFilter, adding to request")
                     builder.addDeviceFilter(filter)
