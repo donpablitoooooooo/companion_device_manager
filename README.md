@@ -90,8 +90,25 @@ The callback passed to `registerBackgroundCallback` must be:
 
 - a top-level or static function
 - annotated with `@pragma('vm:entry-point')`
+- start with the standard headless-engine init lines, before touching any
+  `MethodChannel`-backed API (this plugin or any other):
 
-This is required because Android may need to start a headless Flutter engine when the companion device service wakes the app.
+```dart
+import 'dart:ui';
+import 'package:flutter/widgets.dart';
+
+@pragma('vm:entry-point')
+Future<void> companionDeviceWakeCallback() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  DartPluginRegistrant.ensureInitialized();
+  // ...your code, can now call CompanionDeviceManager().getLastBackgroundEvent() etc.
+}
+```
+
+The system spins up a fresh headless Flutter engine to run the callback when
+the device appears or disappears; without those two init calls
+`ServicesBinding.instance` is not available and any plugin call throws
+`Binding has not yet been initialized`.
 
 ## Example app
 

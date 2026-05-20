@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
+import 'dart:ui';
 
 import 'package:companion_device_manager/companion_device_manager.dart';
 import 'package:flutter/material.dart';
@@ -12,11 +13,16 @@ void main() {
 
 @pragma('vm:entry-point')
 Future<void> companionDeviceWakeCallback() async {
+  // The system spins up a headless FlutterEngine to run this callback, so the
+  // Flutter bindings are NOT initialized yet. Initialize them before touching
+  // any MethodChannel-backed API (otherwise ServicesBinding.instance throws).
+  WidgetsFlutterBinding.ensureInitialized();
+  DartPluginRegistrant.ensureInitialized();
+
   final timestamp = DateTime.now();
   final isoTime = timestamp.toIso8601String();
   debugPrint('[CDM Background Callback] Invoked at $isoTime (${timestamp.millisecondsSinceEpoch}ms)');
 
-  // Verify this is truly executing in Dart by logging the event
   final manager = CompanionDeviceManager();
   final lastEvent = await manager.getLastBackgroundEvent();
   if (lastEvent != null) {
