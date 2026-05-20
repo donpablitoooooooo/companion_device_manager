@@ -6,6 +6,48 @@ import 'dart:ui';
 import 'package:companion_device_manager/companion_device_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+const String _notifChannelId = 'cdm_presence';
+const String _notifChannelName = 'Companion device presence';
+const int _notifAppearedId = 1001;
+const int _notifDisappearedId = 1002;
+
+Future<FlutterLocalNotificationsPlugin> _setupNotifications() async {
+  final plugin = FlutterLocalNotificationsPlugin();
+  await plugin.initialize(
+    const InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+    ),
+  );
+  await plugin
+      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(
+        const AndroidNotificationChannel(
+          _notifChannelId,
+          _notifChannelName,
+          importance: Importance.high,
+        ),
+      );
+  return plugin;
+}
+
+Future<void> _showPresenceNotification({required bool appeared}) async {
+  final plugin = await _setupNotifications();
+  await plugin.show(
+    appeared ? _notifAppearedId : _notifDisappearedId,
+    appeared ? "Poggi c'è" : 'Poggi è andato via',
+    null,
+    const NotificationDetails(
+      android: AndroidNotificationDetails(
+        _notifChannelId,
+        _notifChannelName,
+        importance: Importance.high,
+        priority: Priority.high,
+      ),
+    ),
+  );
+}
 
 void main() {
   runApp(const CompanionDeviceManagerExampleApp());
@@ -27,6 +69,14 @@ Future<void> companionDeviceWakeCallback() async {
   final lastEvent = await manager.getLastBackgroundEvent();
   if (lastEvent != null) {
     debugPrint('[CDM Background Callback] Last background event: ${lastEvent.type} at ${lastEvent.timestamp}');
+    switch (lastEvent.type) {
+      case 'device_appeared':
+        await _showPresenceNotification(appeared: true);
+        break;
+      case 'device_disappeared':
+        await _showPresenceNotification(appeared: false);
+        break;
+    }
   }
 }
 
@@ -58,6 +108,7 @@ class _InitializeCallbackWrapperState extends State<_InitializeCallbackWrapper> 
   void initState() {
     super.initState();
     _ensureCallbackRegistered();
+    _ensureNotificationsReady();
   }
 
   Future<void> _ensureCallbackRegistered() async {
@@ -71,6 +122,14 @@ class _InitializeCallbackWrapperState extends State<_InitializeCallbackWrapper> 
     } catch (error) {
       debugPrint('[CDM] Error auto-registering callback: $error');
     }
+  }
+
+  Future<void> _ensureNotificationsReady() async {
+    final plugin = await _setupNotifications();
+    final granted = await plugin
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        ?.requestNotificationsPermission();
+    debugPrint('[CDM] POST_NOTIFICATIONS granted=$granted');
   }
 
   @override
