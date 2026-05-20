@@ -1,10 +1,53 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
+import 'dart:ui';
 
 import 'package:companion_device_manager/companion_device_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+const String _notifChannelId = 'cdm_presence';
+const String _notifChannelName = 'Companion device presence';
+const int _notifAppearedId = 1001;
+const int _notifDisappearedId = 1002;
+
+Future<FlutterLocalNotificationsPlugin> _setupNotifications() async {
+  final plugin = FlutterLocalNotificationsPlugin();
+  await plugin.initialize(
+    const InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+    ),
+  );
+  await plugin
+      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(
+        const AndroidNotificationChannel(
+          _notifChannelId,
+          _notifChannelName,
+          importance: Importance.high,
+        ),
+      );
+  return plugin;
+}
+
+Future<void> _showPresenceNotification({required bool appeared}) async {
+  final plugin = await _setupNotifications();
+  await plugin.show(
+    appeared ? _notifAppearedId : _notifDisappearedId,
+    appeared ? "Poggi c'è" : 'Poggi è andato via',
+    null,
+    const NotificationDetails(
+      android: AndroidNotificationDetails(
+        _notifChannelId,
+        _notifChannelName,
+        importance: Importance.high,
+        priority: Priority.high,
+      ),
+    ),
+  );
+}
 
 void main() {
   runApp(const CompanionDeviceManagerExampleApp());
@@ -12,15 +55,28 @@ void main() {
 
 @pragma('vm:entry-point')
 Future<void> companionDeviceWakeCallback() async {
+  // The system spins up a headless FlutterEngine to run this callback, so the
+  // Flutter bindings are NOT initialized yet. Initialize them before touching
+  // any MethodChannel-backed API (otherwise ServicesBinding.instance throws).
+  WidgetsFlutterBinding.ensureInitialized();
+  DartPluginRegistrant.ensureInitialized();
+
   final timestamp = DateTime.now();
   final isoTime = timestamp.toIso8601String();
   debugPrint('[CDM Background Callback] Invoked at $isoTime (${timestamp.millisecondsSinceEpoch}ms)');
 
-  // Verify this is truly executing in Dart by logging the event
   final manager = CompanionDeviceManager();
   final lastEvent = await manager.getLastBackgroundEvent();
   if (lastEvent != null) {
     debugPrint('[CDM Background Callback] Last background event: ${lastEvent.type} at ${lastEvent.timestamp}');
+    switch (lastEvent.type) {
+      case 'device_appeared':
+        await _showPresenceNotification(appeared: true);
+        break;
+      case 'device_disappeared':
+        await _showPresenceNotification(appeared: false);
+        break;
+    }
   }
 }
 
@@ -52,6 +108,7 @@ class _InitializeCallbackWrapperState extends State<_InitializeCallbackWrapper> 
   void initState() {
     super.initState();
     _ensureCallbackRegistered();
+    _ensureNotificationsReady();
   }
 
   Future<void> _ensureCallbackRegistered() async {
@@ -65,6 +122,14 @@ class _InitializeCallbackWrapperState extends State<_InitializeCallbackWrapper> 
     } catch (error) {
       debugPrint('[CDM] Error auto-registering callback: $error');
     }
+  }
+
+  Future<void> _ensureNotificationsReady() async {
+    final plugin = await _setupNotifications();
+    final granted = await plugin
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        ?.requestNotificationsPermission();
+    debugPrint('[CDM] POST_NOTIFICATIONS granted=$granted');
   }
 
   @override
@@ -83,8 +148,7 @@ class CompanionDeviceManagerHomePage extends StatefulWidget {
 
 class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerHomePage> {
   final CompanionDeviceManager _manager = CompanionDeviceManager();
-  final TextEditingController _addressController =
-      TextEditingController(text: 'A7:09:65:57:B7:D6');
+  final TextEditingController _addressController = TextEditingController();
   StreamSubscription<CompanionDeviceEvent>? _eventSubscription;
   String? _lastEventSignature;
 
@@ -250,14 +314,13 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
 
   Future<void> _associate() async {
     final address = _addressController.text.trim();
-    if (address.isEmpty) {
-      setState(() => _status = 'Please enter a Bluetooth MAC address.');
-      return;
-    }
+    final hasAddress = address.isNotEmpty;
 
     setState(() {
       _busy = true;
-      _status = 'Launching the Android companion device chooser...';
+      _status = hasAddress
+          ? 'Launching the Android companion device chooser for $address...'
+          : 'Scanning all nearby BLE devices. Pick yours from the system dialog...';
     });
 
     try {
@@ -265,9 +328,11 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
         CompanionDeviceAssociationRequest(
           displayName: 'Companion Device Manager Example',
           filters: <CompanionDeviceFilter>[
-            CompanionDeviceFilter.bluetoothLe(address: address),
+            CompanionDeviceFilter.bluetoothLe(
+              address: hasAddress ? address : null,
+            ),
           ],
-          singleDevice: true,
+          singleDevice: hasAddress,
         ),
       );
 
@@ -370,8 +435,11 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
                 TextField(
                   controller: _addressController,
                   decoration: const InputDecoration(
-                    labelText: 'Bluetooth MAC address',
-                    helperText: 'Use the BLE device MAC address when testing.',
+                    labelText: 'Bluetooth MAC address (optional)',
+                    helperText:
+                        'Leave empty to scan all nearby BLE devices and pick one '
+                        'from the system chooser.',
+                    helperMaxLines: 2,
                     border: OutlineInputBorder(),
                   ),
                 ),

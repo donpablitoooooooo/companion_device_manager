@@ -90,8 +90,25 @@ The callback passed to `registerBackgroundCallback` must be:
 
 - a top-level or static function
 - annotated with `@pragma('vm:entry-point')`
+- start with the standard headless-engine init lines, before touching any
+  `MethodChannel`-backed API (this plugin or any other):
 
-This is required because Android may need to start a headless Flutter engine when the companion device service wakes the app.
+```dart
+import 'dart:ui';
+import 'package:flutter/widgets.dart';
+
+@pragma('vm:entry-point')
+Future<void> companionDeviceWakeCallback() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  DartPluginRegistrant.ensureInitialized();
+  // ...your code, can now call CompanionDeviceManager().getLastBackgroundEvent() etc.
+}
+```
+
+The system spins up a fresh headless Flutter engine to run the callback when
+the device appears or disappears; without those two init calls
+`ServicesBinding.instance` is not available and any plugin call throws
+`Binding has not yet been initialized`.
 
 ## Example app
 
@@ -114,11 +131,16 @@ flutter run
 
 The plugin targets Android devices that support Companion Device Manager.
 
-Depending on the device type you are pairing with, you may also need Bluetooth-related runtime permissions in the host app.
+The Bluetooth permissions required by the CDM scan (`BLUETOOTH_SCAN`,
+`BLUETOOTH_CONNECT`, and the legacy `BLUETOOTH` / `BLUETOOTH_ADMIN` for API ≤ 30)
+are declared in the plugin's `AndroidManifest.xml` and merged into the host app
+automatically — you do not need to add them yourself.
 
 Use `CompanionDeviceFilter.bluetoothLe(...)` for BLE peripherals and `CompanionDeviceFilter.bluetooth(...)` for classic Bluetooth devices.
 
-The first version of the plugin focuses on Bluetooth address-based filters to keep the API simple and predictable.
+`address` is optional: omit it (or pass `null`) to let the system show every
+nearby device of that type in the chooser, then pin it down once you know the
+MAC. Combine it with `singleDevice: false` so the chooser presents a list.
 
 ## Publishing checklist
 

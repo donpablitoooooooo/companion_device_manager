@@ -7,12 +7,12 @@ abstract class CompanionDeviceFilter {
   const CompanionDeviceFilter._();
 
   const factory CompanionDeviceFilter.bluetooth({
-    required String address,
+    String? address,
     String? namePattern,
   }) = _BluetoothCompanionDeviceFilter;
 
   const factory CompanionDeviceFilter.bluetoothLe({
-    required String address,
+    String? address,
     String? namePattern,
   }) = _BluetoothLeCompanionDeviceFilter;
 
@@ -40,12 +40,12 @@ abstract class CompanionDeviceFilter {
     switch (type) {
       case 'bluetooth':
         return CompanionDeviceFilter.bluetooth(
-          address: address ?? '',
+          address: address,
           namePattern: namePattern,
         );
       case 'bluetoothLe':
         return CompanionDeviceFilter.bluetoothLe(
-          address: address ?? '',
+          address: address,
           namePattern: namePattern,
         );
       default:
@@ -60,12 +60,12 @@ abstract class CompanionDeviceFilter {
 
 class _BluetoothCompanionDeviceFilter extends CompanionDeviceFilter {
   const _BluetoothCompanionDeviceFilter({
-    required this.address,
+    this.address,
     this.namePattern,
   }) : super._();
 
   @override
-  final String address;
+  final String? address;
 
   @override
   final String? namePattern;
@@ -76,12 +76,12 @@ class _BluetoothCompanionDeviceFilter extends CompanionDeviceFilter {
 
 class _BluetoothLeCompanionDeviceFilter extends CompanionDeviceFilter {
   const _BluetoothLeCompanionDeviceFilter({
-    required this.address,
+    this.address,
     this.namePattern,
   }) : super._();
 
   @override
-  final String address;
+  final String? address;
 
   @override
   final String? namePattern;
