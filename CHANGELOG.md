@@ -1,9 +1,31 @@
-## Unreleased
+## 0.2.2
+
+- **Breaking change**: `registerBackgroundCallback` now requires an informative callback signature: `Future<void> Function(CompanionDeviceEvent event)`.
+- **Breaking change**: `CompanionDeviceEvent.type` is now a typed enum (`CompanionDeviceEventType`) instead of `String`.
+- Added dispatcher-based background delivery bridge so headless callback execution receives the exact event payload from Android safely.
+- Background callback payload now carries event type + association data (including MAC address) for direct business-logic handling.
+- Updated example app and docs for enum-based event handling and the new callback signature.
+
+## 0.2.1
+
+- Added `CompanionDeviceManager.associateByMacAddress(String macAddress)` convenience API for MAC-only association requests.
+- Added `CompanionDeviceManager.disassociateByMacAddress(String macAddress)` convenience API for cross-session disassociation using only MAC address.
+- Added strict MAC format validation (`XX:XX:XX:XX:XX:XX`) and uppercase normalization for the new convenience APIs.
+- Clarified Android API-level support in docs: association APIs require API 26+, while background presence/wake flows require API 31+ (with API 33+ id-based observation path).
+
+## 0.2.0
 
 - Added `CompanionDeviceManager.backgroundEvents` for reactive `device_appeared`/`device_disappeared` updates.
 - Added Android `EventChannel` support (`companion_device_manager/events`) and native event emission from `CompanionDeviceBackgroundService`.
-- Updated the example app to reactively refresh UI and auto-log new background events from the stream.
-- Updated README and `docs/` to officially document the new reactive API.
+- Fixed background stream attachment/detachment race condition: event sink now properly scoped per Flutter engine to avoid conflicts between foreground and headless engines.
+- Fixed `SharedPreferences` race condition on event persistence by switching from async `apply()` to synchronous `commit()` for reliable "Reload last event" behavior.
+- Fixed `ServicesBinding` initialization error in headless background callback by ensuring `WidgetsFlutterBinding.ensureInitialized()` and `ui.DartPluginRegistrant.ensureInitialized()` are called early in flow.
+- Removed duplicate plugin registration in headless Flutter engine to eliminate duplicate registration warnings.
+- Updated the example app to:
+  - reactively refresh UI with background events from the stream
+  - auto-log new background events
+  - display formatted receive timestamp (date/time + relative "time ago" update)
+- Updated README with background callback initialization requirements and example app usage.
 
 ## 0.1.0
 
@@ -13,7 +35,7 @@
 - Added background callback registration for wake scenarios using `CompanionDeviceService`.
 - Added Android native storage for callback handles and last background event payload.
 - Reworked the example app to demonstrate the full association and wake callback flow.
-- Added detailed documentation in `docs/` and a pub.dev-style root README.
+- Added detailed documentation in `doc/` and a pub.dev-style root README.
 
 ## 0.0.1
 

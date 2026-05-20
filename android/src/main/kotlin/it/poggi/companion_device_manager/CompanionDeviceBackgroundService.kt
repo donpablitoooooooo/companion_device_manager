@@ -11,10 +11,15 @@ import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.embedding.engine.loader.FlutterLoader
 import io.flutter.view.FlutterCallbackInformation
 import io.flutter.FlutterInjector
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
 
 class CompanionDeviceBackgroundService : CompanionDeviceService() {
     private val tag = "CDMBackgroundService"
     private var activeEngine: FlutterEngine? = null
+    private var backgroundChannel: MethodChannel? = null
+    private var pendingEventPayload: Map<String, Any?>? = null
+    private var pendingCallbackHandle: Long? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -54,13 +59,19 @@ class CompanionDeviceBackgroundService : CompanionDeviceService() {
         Log.d(tag, "Persisted and emitted event type=$type")
 
         val callbackHandle = CompanionDeviceStorage.getBackgroundCallbackHandle(context)
+        val dispatcherHandle = CompanionDeviceStorage.getBackgroundDispatcherHandle(context)
         if (callbackHandle == null) {
             Log.w(tag, "No registered background callback handle; event will not execute Dart callback")
             return
         }
-        Log.d(tag, "Found registered callback handle=$callbackHandle")
+        if (dispatcherHandle == null) {
+            Log.e(tag, "Missing background dispatcher handle. Re-register callback from Dart.")
+            return
+        }
+
+        Log.d(tag, "Found registered callback handle=$callbackHandle dispatcherHandle=$dispatcherHandle")
         runOnMainThread {
-            startBackgroundCallbackEngine(context, callbackHandle)
+            startBackgroundCallbackEngine(context, dispatcherHandle, callbackHandle, payload)
         }
     }
 
@@ -72,13 +83,22 @@ class CompanionDeviceBackgroundService : CompanionDeviceService() {
         }
     }
 
-    private fun startBackgroundCallbackEngine(context: Context, callbackHandle: Long) {
+    private fun startBackgroundCallbackEngine(
+        context: Context,
+        dispatcherHandle: Long,
+        callbackHandle: Long,
+        eventPayload: Map<String, Any?>,
+    ) {
         activeEngine?.destroy()
         activeEngine = null
+        backgroundChannel = null
 
-        val callbackInfo = FlutterCallbackInformation.lookupCallbackInformation(callbackHandle)
+        pendingEventPayload = eventPayload
+        pendingCallbackHandle = callbackHandle
+
+        val callbackInfo = FlutterCallbackInformation.lookupCallbackInformation(dispatcherHandle)
             ?: run {
-                Log.e(tag, "Unable to resolve Flutter callback info for handle=$callbackHandle")
+                Log.e(tag, "Unable to resolve Flutter callback info for dispatcherHandle=$dispatcherHandle")
                 return
             }
 
@@ -89,11 +109,17 @@ class CompanionDeviceBackgroundService : CompanionDeviceService() {
         val engine = FlutterEngine(context)
         activeEngine = engine
 
-        runCatching {
-            Class.forName("io.flutter.plugins.GeneratedPluginRegistrant")
-                .getDeclaredMethod("registerWith", FlutterEngine::class.java)
-                .invoke(null, engine)
+        val channel = MethodChannel(engine.dartExecutor.binaryMessenger, BACKGROUND_CHANNEL_NAME)
+        backgroundChannel = channel
+        channel.setMethodCallHandler { call: MethodCall, result: MethodChannel.Result ->
+            if (call.method == "backgroundDispatcherInitialized") {
+                dispatchPendingEventToDart()
+                result.success(null)
+            } else {
+                result.notImplemented()
+            }
         }
+
 
         val dartCallback = DartExecutor.DartCallback(
             context.assets,
@@ -101,14 +127,43 @@ class CompanionDeviceBackgroundService : CompanionDeviceService() {
             callbackInfo,
         )
         engine.dartExecutor.executeDartCallback(dartCallback)
-        Log.d(tag, "Executed Dart background callback for event")
+        Log.d(tag, "Executed Dart background dispatcher callback")
+    }
+
+    private fun dispatchPendingEventToDart() {
+        val channel = backgroundChannel
+        val eventPayload = pendingEventPayload
+        val callbackHandle = pendingCallbackHandle
+        if (channel == null || eventPayload == null || callbackHandle == null) {
+            Log.w(tag, "Skipping event dispatch because payload, handle, or channel is missing")
+            return
+        }
+
+        channel.invokeMethod(
+            "dispatchBackgroundEvent",
+            mapOf<String, Any?>(
+                "event" to eventPayload,
+                "callbackHandle" to callbackHandle,
+            ),
+        )
+        pendingEventPayload = null
+        pendingCallbackHandle = null
+        Log.d(tag, "Delivered background event payload to Dart dispatcher")
     }
 
     override fun onDestroy() {
+        backgroundChannel?.setMethodCallHandler(null)
+        backgroundChannel = null
+        pendingEventPayload = null
+        pendingCallbackHandle = null
         activeEngine?.destroy()
         activeEngine = null
         Log.d(tag, "Service onDestroy called")
         super.onDestroy()
+    }
+
+    companion object {
+        private const val BACKGROUND_CHANNEL_NAME = "companion_device_manager/background"
     }
 }
 

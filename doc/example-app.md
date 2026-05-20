@@ -6,6 +6,7 @@ The example app shows how to use the plugin from Flutter and demonstrates the tw
 
 1. launching the association chooser
 2. registering a background callback that is woken by the Android companion service
+3. consuming typed callback payload data (`CompanionDeviceEventType` + MAC address)
 
 ## What the example demonstrates
 

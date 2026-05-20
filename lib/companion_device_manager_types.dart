@@ -126,7 +126,9 @@ class CompanionDeviceAssociationRequest {
   Map<String, Object?> toMap() {
     return <String, Object?>{
       'displayName': displayName,
-      'filters': filters.map((CompanionDeviceFilter filter) => filter.toMap()).toList(),
+      'filters': filters
+          .map((CompanionDeviceFilter filter) => filter.toMap())
+          .toList(),
       'selfManaged': selfManaged,
       'singleDevice': singleDevice,
       'deviceProfile': deviceProfile,
@@ -205,7 +207,7 @@ class CompanionDeviceEvent {
     this.rawPayload,
   });
 
-  final String type;
+  final CompanionDeviceEventType type;
   final int timestampMs;
   final CompanionDeviceAssociation? association;
   final Map<String, Object?>? rawPayload;
@@ -214,7 +216,7 @@ class CompanionDeviceEvent {
 
   Map<String, Object?> toMap() {
     return <String, Object?>{
-      'type': type,
+      'type': type.wireValue,
       'timestampMs': timestampMs,
       'association': association?.toMap(),
       'rawPayload': rawPayload,
@@ -226,8 +228,9 @@ class CompanionDeviceEvent {
     final rawPayload = map['rawPayload'];
 
     return CompanionDeviceEvent(
-      type: map['type'] as String? ?? 'unknown',
-      timestampMs: map['timestampMs'] as int? ?? DateTime.now().millisecondsSinceEpoch,
+      type: CompanionDeviceEventType.fromWireValue(map['type'] as String?),
+      timestampMs:
+          map['timestampMs'] as int? ?? DateTime.now().millisecondsSinceEpoch,
       association: associationMap is Map<Object?, Object?>
           ? CompanionDeviceAssociation.fromMap(associationMap)
           : null,
@@ -242,5 +245,38 @@ class CompanionDeviceEvent {
   String toJson() => jsonEncode(toMap());
 }
 
-typedef CompanionDeviceBackgroundCallback = Future<void> Function();
+enum CompanionDeviceEventType {
+  deviceAppeared,
+  deviceDisappeared,
+  associationCreated,
+  unknown;
 
+  static CompanionDeviceEventType fromWireValue(String? value) {
+    switch (value) {
+      case 'device_appeared':
+        return CompanionDeviceEventType.deviceAppeared;
+      case 'device_disappeared':
+        return CompanionDeviceEventType.deviceDisappeared;
+      case 'association_created':
+        return CompanionDeviceEventType.associationCreated;
+      default:
+        return CompanionDeviceEventType.unknown;
+    }
+  }
+
+  String get wireValue {
+    switch (this) {
+      case CompanionDeviceEventType.deviceAppeared:
+        return 'device_appeared';
+      case CompanionDeviceEventType.deviceDisappeared:
+        return 'device_disappeared';
+      case CompanionDeviceEventType.associationCreated:
+        return 'association_created';
+      case CompanionDeviceEventType.unknown:
+        return 'unknown';
+    }
+  }
+}
+
+typedef CompanionDeviceBackgroundCallback =
+    Future<void> Function(CompanionDeviceEvent event);

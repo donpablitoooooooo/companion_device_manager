@@ -1,6 +1,8 @@
 name: companion_device_manager
 description: "Android-only Flutter plugin for Companion Device Manager (CDM) association and wake callbacks"
-version: 0.1.0
+version: 0.2.2
+repository: https://github.com/ohdonpiano/companion_device_manager
+issue_tracker: https://github.com/ohdonpiano/companion_device_manager/issues
 
 topics:
   - companion-device

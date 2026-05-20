@@ -1,10 +1,51 @@
 import 'dart:ui';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 
 import 'companion_device_manager_platform_interface.dart';
 import 'companion_device_manager_types.dart';
+
+const MethodChannel _backgroundCallbackChannel = MethodChannel(
+  'companion_device_manager/background',
+);
+
+@pragma('vm:entry-point')
+Future<void> _backgroundCallbackDispatcher() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  DartPluginRegistrant.ensureInitialized();
+
+  _backgroundCallbackChannel.setMethodCallHandler((MethodCall call) async {
+    if (call.method != 'dispatchBackgroundEvent') {
+      throw MissingPluginException('Unknown background callback method: ${call.method}');
+    }
+
+    final arguments = call.arguments;
+    if (arguments is! Map<Object?, Object?>) {
+      throw const FormatException('Invalid background callback payload type.');
+    }
+
+    final rawEvent = arguments['event'];
+    final rawCallbackHandle = arguments['callbackHandle'];
+
+    if (rawEvent is! Map<Object?, Object?> || rawCallbackHandle is! int) {
+      throw const FormatException('Invalid background callback payload fields.');
+    }
+
+    final callback = PluginUtilities.getCallbackFromHandle(
+      CallbackHandle.fromRawHandle(rawCallbackHandle),
+    );
+    if (callback is! CompanionDeviceBackgroundCallback) {
+      throw ArgumentError(
+        'Unable to resolve a valid background callback. Re-register the callback with registerBackgroundCallback.',
+      );
+    }
+
+    await callback(CompanionDeviceEvent.fromMap(rawEvent));
+  });
+
+  await _backgroundCallbackChannel.invokeMethod<void>('backgroundDispatcherInitialized');
+}
 
 /// An implementation of [CompanionDeviceManagerPlatform] that uses method channels.
 class MethodChannelCompanionDeviceManager extends CompanionDeviceManagerPlatform {
@@ -58,16 +99,24 @@ class MethodChannelCompanionDeviceManager extends CompanionDeviceManagerPlatform
   Future<void> registerBackgroundCallback(
     CompanionDeviceBackgroundCallback callback,
   ) async {
-    final handle = PluginUtilities.getCallbackHandle(callback);
-    if (handle == null) {
+    final callbackHandle = PluginUtilities.getCallbackHandle(callback);
+    final dispatcherHandle = PluginUtilities.getCallbackHandle(
+      _backgroundCallbackDispatcher,
+    );
+
+    if (callbackHandle == null || dispatcherHandle == null) {
       throw ArgumentError(
-        'The callback must be a top-level or static function annotated with @pragma(\'vm:entry-point\').' ,
+        'The callback must be a top-level or static function annotated with @pragma(\'vm:entry-point\').',
       );
     }
 
-    await methodChannel.invokeMethod<void>('registerBackgroundCallback', <String, Object?>{
-      'callbackHandle': handle.toRawHandle(),
-    });
+    await methodChannel.invokeMethod<void>(
+      'registerBackgroundCallback',
+      <String, Object?>{
+        'callbackHandle': callbackHandle.toRawHandle(),
+        'dispatcherHandle': dispatcherHandle.toRawHandle(),
+      },
+    );
   }
 
   @override

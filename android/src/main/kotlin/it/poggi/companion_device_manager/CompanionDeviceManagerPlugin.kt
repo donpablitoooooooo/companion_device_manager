@@ -23,6 +23,7 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
+import java.util.concurrent.Executors
 
 class CompanionDeviceManagerPlugin :
     FlutterPlugin,
@@ -34,7 +35,9 @@ class CompanionDeviceManagerPlugin :
     private var activityBinding: ActivityPluginBinding? = null
     private lateinit var channel: MethodChannel
     private lateinit var eventsChannel: EventChannel
+    private val eventStreamOwner = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val backgroundExecutor = Executors.newSingleThreadExecutor()
     private var pendingAssociationResult: Result? = null
     private var pendingAssociationRequest: AssociationRequest? = null
     private var pendingAssociationDisplayName: String? = null
@@ -48,17 +51,17 @@ class CompanionDeviceManagerPlugin :
         eventsChannel.setStreamHandler(
             object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
-                    CompanionDeviceEventStream.attachSink(events)
+                    CompanionDeviceEventStream.attachSink(eventStreamOwner, events)
                 }
 
                 override fun onCancel(arguments: Any?) {
-                    CompanionDeviceEventStream.detachSink()
+                    CompanionDeviceEventStream.detachSink(eventStreamOwner)
                 }
             },
         )
 
         if (CompanionDeviceStorage.getBackgroundCallbackHandle(applicationContext) != null) {
-            startObservingPresenceForCurrentAssociations()
+            schedulePresenceObservationStart("engine_attached")
         }
     }
 
@@ -81,8 +84,9 @@ class CompanionDeviceManagerPlugin :
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
         eventsChannel.setStreamHandler(null)
-        CompanionDeviceEventStream.detachSink()
+        CompanionDeviceEventStream.detachSink(eventStreamOwner)
         applicationContext = null
+        backgroundExecutor.shutdown()
     }
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
@@ -227,7 +231,7 @@ class CompanionDeviceManagerPlugin :
                 "selfManaged" to false,
                 "lastTimeConnectedMs" to null,
             )
-            startObservingPresenceForCurrentAssociations()
+            schedulePresenceObservationStart("association_completed")
             pendingResult.success(response)
             CompanionDeviceStorage.persistEvent(
                 applicationContext,
@@ -369,21 +373,42 @@ class CompanionDeviceManagerPlugin :
 
     private fun registerBackgroundCallback(call: MethodCall, result: Result) {
         val handle = call.argument<Number>("callbackHandle")?.toLong()
-        if (handle == null || handle == 0L) {
-            result.error("invalid_arguments", "callbackHandle is required.", null)
+        val dispatcherHandle = call.argument<Number>("dispatcherHandle")?.toLong()
+
+        if (handle == null || handle == 0L || dispatcherHandle == null || dispatcherHandle == 0L) {
+            result.error("invalid_arguments", "callbackHandle and dispatcherHandle are required.", null)
             return
         }
 
-        Log.d(tag, "Registering background callback handle=$handle")
+        Log.d(tag, "Registering background callback handle=$handle dispatcherHandle=$dispatcherHandle")
         CompanionDeviceStorage.storeBackgroundCallbackHandle(applicationContext, handle)
-        startObservingPresenceForCurrentAssociations()
+        CompanionDeviceStorage.storeBackgroundDispatcherHandle(applicationContext, dispatcherHandle)
+        schedulePresenceObservationStart("callback_registered")
         result.success(null)
+    }
+
+    private fun schedulePresenceObservationStart(reason: String) {
+        val context = applicationContext
+        if (context == null) {
+            Log.w(tag, "Skipping presence observation start for reason=$reason because plugin context is unavailable")
+            return
+        }
+
+        backgroundExecutor.execute {
+            runCatching {
+                Log.d(tag, "Starting presence observation asynchronously for reason=$reason")
+                startObservingPresenceForCurrentAssociations()
+            }.onFailure { error ->
+                Log.e(tag, "Failed to start presence observation for reason=$reason", error)
+            }
+        }
     }
 
     private fun clearBackgroundCallback(result: Result) {
         Log.d(tag, "Clearing background callback")
         stopObservingPresenceForCurrentAssociations()
         CompanionDeviceStorage.clearBackgroundCallbackHandle(applicationContext)
+        CompanionDeviceStorage.clearBackgroundDispatcherHandle(applicationContext)
         result.success(null)
     }
 
@@ -507,6 +532,7 @@ class CompanionDeviceManagerPlugin :
 internal object CompanionDeviceStorage {
     private const val PREFS_NAME = "companion_device_manager"
     private const val KEY_BACKGROUND_CALLBACK_HANDLE = "background_callback_handle"
+    private const val KEY_BACKGROUND_DISPATCHER_HANDLE = "background_dispatcher_handle"
     private const val KEY_LAST_EVENT_JSON = "last_event_json"
 
     fun storeBackgroundCallbackHandle(context: Context?, handle: Long) {
@@ -514,7 +540,7 @@ internal object CompanionDeviceStorage {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putLong(KEY_BACKGROUND_CALLBACK_HANDLE, handle)
-            .apply()
+            .commit()
     }
 
     fun getBackgroundCallbackHandle(context: Context?): Long? {
@@ -529,7 +555,30 @@ internal object CompanionDeviceStorage {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .remove(KEY_BACKGROUND_CALLBACK_HANDLE)
-            .apply()
+            .commit()
+    }
+
+    fun storeBackgroundDispatcherHandle(context: Context?, handle: Long) {
+        context ?: return
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_BACKGROUND_DISPATCHER_HANDLE, handle)
+            .commit()
+    }
+
+    fun getBackgroundDispatcherHandle(context: Context?): Long? {
+        context ?: return null
+        val handle = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_BACKGROUND_DISPATCHER_HANDLE, 0L)
+        return handle.takeIf { it != 0L }
+    }
+
+    fun clearBackgroundDispatcherHandle(context: Context?) {
+        context ?: return
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_BACKGROUND_DISPATCHER_HANDLE)
+            .commit()
     }
 
     fun persistEvent(context: Context?, payload: Map<String, Any?>) {
@@ -538,7 +587,7 @@ internal object CompanionDeviceStorage {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_LAST_EVENT_JSON, json)
-            .apply()
+            .commit()
     }
 
     fun getLastEventMap(context: Context?): Map<String, Any?>? {
