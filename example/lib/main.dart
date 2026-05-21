@@ -361,6 +361,19 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
 
 
   Future<void> _associate() async {
+    if (_associations.isNotEmpty) {
+      final existing = _associations.first;
+      _showSnackBar(
+        'Remove the existing association (${existing.macAddress ?? 'unknown'}) first.',
+      );
+      setState(() {
+        _status =
+            'Cannot create a new association: one already exists for ${existing.macAddress ?? 'unknown'}. '
+            'Tap "Remove" on it first, then try again.';
+      });
+      return;
+    }
+
     final address = _addressController.text.trim();
     final hasAddress = address.isNotEmpty;
 
@@ -393,7 +406,11 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
       _showSnackBar('Association completed.');
     } on PlatformException catch (error) {
       if (!mounted) return;
-      setState(() => _status = 'Association failed: ${error.message}');
+      final message = error.code == 'already_associated'
+          ? 'An association already exists. Remove it first, then try again.'
+          : 'Association failed: ${error.message}';
+      setState(() => _status = message);
+      _showSnackBar(message);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -480,8 +497,18 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (_associations.isNotEmpty) ...[
+                  Text(
+                    'You already have ${_associations.length} association(s). '
+                    'This app pairs one device at a time — remove the existing '
+                    'one below before starting a new association.',
+                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 TextField(
                   controller: _addressController,
+                  enabled: _associations.isEmpty,
                   decoration: const InputDecoration(
                     labelText: 'Bluetooth MAC address (optional)',
                     helperText:
@@ -493,7 +520,7 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
                 ),
                 const SizedBox(height: 12),
                 FilledButton(
-                  onPressed: _busy ? null : _associate,
+                  onPressed: (_busy || _associations.isNotEmpty) ? null : _associate,
                   child: const Text('Start association'),
                 ),
               ],
