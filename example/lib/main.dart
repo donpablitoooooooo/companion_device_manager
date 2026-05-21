@@ -44,32 +44,46 @@ Future<FlutterLocalNotificationsPlugin> _setupNotifications() async {
 }
 
 Future<void> _showPresenceNotification({required bool appeared}) async {
-  final plugin = await _setupNotifications();
-  await plugin.show(
-    appeared ? _notifAppearedId : _notifDisappearedId,
-    appeared ? "Poggi c'è" : 'Poggi è andato via',
-    null,
-    const NotificationDetails(
-      android: AndroidNotificationDetails(
-        _notifChannelId,
-        _notifChannelName,
-        importance: Importance.high,
-        priority: Priority.high,
+  debugPrint('[CDM] _showPresenceNotification(appeared: $appeared) starting');
+  try {
+    final plugin = await _setupNotifications();
+    debugPrint('[CDM] Got plugin instance, calling show()');
+    await plugin.show(
+      appeared ? _notifAppearedId : _notifDisappearedId,
+      appeared ? "Poggi c'è" : 'Poggi è andato via',
+      null,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _notifChannelId,
+          _notifChannelName,
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
       ),
-    ),
-  );
+    );
+    debugPrint('[CDM] plugin.show() completed (appeared: $appeared)');
+  } catch (error, stack) {
+    debugPrint('[CDM] ERROR showing notification (appeared: $appeared): $error');
+    debugPrint('$stack');
+  }
 }
 
 Future<void> _handleBackgroundEvent(Map<String, dynamic> event) async {
   final type = event['type'] as String?;
   debugPrint('[CDM Background Callback] Handling event type=$type');
-  switch (type) {
-    case 'device_appeared':
-      await _showPresenceNotification(appeared: true);
-      break;
-    case 'device_disappeared':
-      await _showPresenceNotification(appeared: false);
-      break;
+  try {
+    switch (type) {
+      case 'device_appeared':
+        await _showPresenceNotification(appeared: true);
+        break;
+      case 'device_disappeared':
+        await _showPresenceNotification(appeared: false);
+        break;
+    }
+    debugPrint('[CDM Background Callback] Finished handling event type=$type');
+  } catch (error, stack) {
+    debugPrint('[CDM Background Callback] ERROR handling event type=$type: $error');
+    debugPrint('$stack');
   }
 }
 
