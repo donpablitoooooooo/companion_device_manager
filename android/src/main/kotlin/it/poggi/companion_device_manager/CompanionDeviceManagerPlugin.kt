@@ -220,9 +220,12 @@ class CompanionDeviceManagerPlugin :
         grouped.forEach { (mac, group) ->
             if (group.size <= 1) return@forEach
 
-            val keep = group.maxByOrNull { runCatching { it.timeApprovedMs }.getOrDefault(0L) } ?: group.last()
+            // The system assigns association ids monotonically, so the highest
+            // id is the most recently approved entry. Keep that one, drop the
+            // rest. (We can't use getTimeApprovedMs() - it's @hide.)
+            val keep = group.maxByOrNull { it.id } ?: group.last()
             val toDrop = group.filter { it.id != keep.id }
-            Log.w(tag, "Detected ${group.size} duplicate associations for mac=$mac, keeping id=${keep.id} (approvedMs=${runCatching { keep.timeApprovedMs }.getOrDefault(-1L)})")
+            Log.w(tag, "Detected ${group.size} duplicate associations for mac=$mac, keeping id=${keep.id}")
             toDrop.forEach { stale ->
                 Log.w(tag, "  Removing duplicate associationId=${stale.id} mac=${stale.deviceMacAddress}")
                 runCatching {
