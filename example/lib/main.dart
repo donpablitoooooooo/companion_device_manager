@@ -13,7 +13,17 @@ const String _notifChannelName = 'Companion device presence';
 const int _notifAppearedId = 1001;
 const int _notifDisappearedId = 1002;
 
+/// Channel that the native CDM background dispatcher uses to deliver each
+/// presence event to the long-lived background isolate.
+const MethodChannel _backgroundDispatchChannel =
+    MethodChannel('companion_device_manager/background_dispatch');
+
+FlutterLocalNotificationsPlugin? _notificationsPlugin;
+
 Future<FlutterLocalNotificationsPlugin> _setupNotifications() async {
+  final existing = _notificationsPlugin;
+  if (existing != null) return existing;
+
   final plugin = FlutterLocalNotificationsPlugin();
   await plugin.initialize(
     const InitializationSettings(
@@ -29,6 +39,7 @@ Future<FlutterLocalNotificationsPlugin> _setupNotifications() async {
           importance: Importance.high,
         ),
       );
+  _notificationsPlugin = plugin;
   return plugin;
 }
 
@@ -49,6 +60,19 @@ Future<void> _showPresenceNotification({required bool appeared}) async {
   );
 }
 
+Future<void> _handleBackgroundEvent(Map<String, dynamic> event) async {
+  final type = event['type'] as String?;
+  debugPrint('[CDM Background Callback] Handling event type=$type');
+  switch (type) {
+    case 'device_appeared':
+      await _showPresenceNotification(appeared: true);
+      break;
+    case 'device_disappeared':
+      await _showPresenceNotification(appeared: false);
+      break;
+  }
+}
+
 void main() {
   runApp(const CompanionDeviceManagerExampleApp());
 }
@@ -62,21 +86,31 @@ Future<void> companionDeviceWakeCallback() async {
   DartPluginRegistrant.ensureInitialized();
 
   final timestamp = DateTime.now();
-  final isoTime = timestamp.toIso8601String();
-  debugPrint('[CDM Background Callback] Invoked at $isoTime (${timestamp.millisecondsSinceEpoch}ms)');
+  debugPrint(
+    '[CDM Background Callback] Engine started at ${timestamp.toIso8601String()}',
+  );
 
-  final manager = CompanionDeviceManager();
-  final lastEvent = await manager.getLastBackgroundEvent();
-  if (lastEvent != null) {
-    debugPrint('[CDM Background Callback] Last background event: ${lastEvent.type} at ${lastEvent.timestamp}');
-    switch (lastEvent.type) {
-      case 'device_appeared':
-        await _showPresenceNotification(appeared: true);
-        break;
-      case 'device_disappeared':
-        await _showPresenceNotification(appeared: false);
-        break;
+  // Initialise the notification plugin once, up front, so the per-event path
+  // is just a `show()` call.
+  await _setupNotifications();
+
+  // The native dispatcher invokes `onEvent` once per CDM presence change. The
+  // payload mirrors the EventChannel one, so we can re-use the same handler.
+  _backgroundDispatchChannel.setMethodCallHandler((call) async {
+    if (call.method == 'onEvent') {
+      final raw = call.arguments;
+      if (raw is Map) {
+        await _handleBackgroundEvent(raw.cast<String, dynamic>());
+      }
     }
+  });
+
+  // Tell the native side we're ready. This flushes any events that arrived
+  // while the engine was still booting.
+  try {
+    await _backgroundDispatchChannel.invokeMethod<void>('ready');
+  } catch (error) {
+    debugPrint('[CDM Background Callback] ready handshake failed: $error');
   }
 }
 

@@ -2,19 +2,10 @@ package it.poggi.companion_device_manager
 
 import android.companion.AssociationInfo
 import android.companion.CompanionDeviceService
-import android.content.Context
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
-import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.embedding.engine.dart.DartExecutor
-import io.flutter.embedding.engine.loader.FlutterLoader
-import io.flutter.view.FlutterCallbackInformation
-import io.flutter.FlutterInjector
 
 class CompanionDeviceBackgroundService : CompanionDeviceService() {
     private val tag = "CDMBackgroundService"
-    private var activeEngine: FlutterEngine? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -58,57 +49,15 @@ class CompanionDeviceBackgroundService : CompanionDeviceService() {
             Log.w(tag, "No registered background callback handle; event will not execute Dart callback")
             return
         }
-        Log.d(tag, "Found registered callback handle=$callbackHandle")
-        runOnMainThread {
-            startBackgroundCallbackEngine(context, callbackHandle)
-        }
-    }
-
-    private fun runOnMainThread(block: () -> Unit) {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            block()
-        } else {
-            Handler(Looper.getMainLooper()).post(block)
-        }
-    }
-
-    private fun startBackgroundCallbackEngine(context: Context, callbackHandle: Long) {
-        activeEngine?.destroy()
-        activeEngine = null
-
-        val callbackInfo = FlutterCallbackInformation.lookupCallbackInformation(callbackHandle)
-            ?: run {
-                Log.e(tag, "Unable to resolve Flutter callback info for handle=$callbackHandle")
-                return
-            }
-
-        val flutterLoader: FlutterLoader = FlutterInjector.instance().flutterLoader()
-        flutterLoader.startInitialization(context)
-        flutterLoader.ensureInitializationComplete(context, null)
-
-        val engine = FlutterEngine(context)
-        activeEngine = engine
-
-        runCatching {
-            Class.forName("io.flutter.plugins.GeneratedPluginRegistrant")
-                .getDeclaredMethod("registerWith", FlutterEngine::class.java)
-                .invoke(null, engine)
-        }
-
-        val dartCallback = DartExecutor.DartCallback(
-            context.assets,
-            flutterLoader.findAppBundlePath(),
-            callbackInfo,
-        )
-        engine.dartExecutor.executeDartCallback(dartCallback)
-        Log.d(tag, "Executed Dart background callback for event")
+        Log.d(tag, "Dispatching to background engine, callbackHandle=$callbackHandle")
+        CompanionDeviceBackgroundDispatcher.dispatchEvent(context, callbackHandle, payload)
     }
 
     override fun onDestroy() {
-        activeEngine?.destroy()
-        activeEngine = null
         Log.d(tag, "Service onDestroy called")
         super.onDestroy()
+        // NOTE: do NOT tear down the dispatcher here. The system can recreate
+        // this service for the next event, but the dispatcher's FlutterEngine
+        // is a process-level singleton we want to keep alive across rebinds.
     }
 }
-

@@ -57,7 +57,12 @@ class CompanionDeviceManagerPlugin :
             },
         )
 
-        if (CompanionDeviceStorage.getBackgroundCallbackHandle(applicationContext) != null) {
+        // Skip auto-starting observation when we're attaching to the headless
+        // background FlutterEngine - the main engine has already registered for
+        // presence updates, and re-registering here just produces redundant
+        // platform calls (and noisy logs).
+        if (!CompanionDeviceBackgroundDispatcher.isBackgroundContext &&
+            CompanionDeviceStorage.getBackgroundCallbackHandle(applicationContext) != null) {
             startObservingPresenceForCurrentAssociations()
         }
     }
@@ -384,6 +389,7 @@ class CompanionDeviceManagerPlugin :
         Log.d(tag, "Clearing background callback")
         stopObservingPresenceForCurrentAssociations()
         CompanionDeviceStorage.clearBackgroundCallbackHandle(applicationContext)
+        CompanionDeviceBackgroundDispatcher.shutdown()
         result.success(null)
     }
 
