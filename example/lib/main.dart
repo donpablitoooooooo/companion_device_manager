@@ -13,7 +13,17 @@ const String _notifChannelName = 'Companion device presence';
 const int _notifAppearedId = 1001;
 const int _notifDisappearedId = 1002;
 
+/// Channel that the native CDM background dispatcher uses to deliver each
+/// presence event to the long-lived background isolate.
+const MethodChannel _backgroundDispatchChannel =
+    MethodChannel('companion_device_manager/background_dispatch');
+
+FlutterLocalNotificationsPlugin? _notificationsPlugin;
+
 Future<FlutterLocalNotificationsPlugin> _setupNotifications() async {
+  final existing = _notificationsPlugin;
+  if (existing != null) return existing;
+
   final plugin = FlutterLocalNotificationsPlugin();
   await plugin.initialize(
     const InitializationSettings(
@@ -29,24 +39,52 @@ Future<FlutterLocalNotificationsPlugin> _setupNotifications() async {
           importance: Importance.high,
         ),
       );
+  _notificationsPlugin = plugin;
   return plugin;
 }
 
 Future<void> _showPresenceNotification({required bool appeared}) async {
-  final plugin = await _setupNotifications();
-  await plugin.show(
-    appeared ? _notifAppearedId : _notifDisappearedId,
-    appeared ? "Poggi c'è" : 'Poggi è andato via',
-    null,
-    const NotificationDetails(
-      android: AndroidNotificationDetails(
-        _notifChannelId,
-        _notifChannelName,
-        importance: Importance.high,
-        priority: Priority.high,
+  debugPrint('[CDM] _showPresenceNotification(appeared: $appeared) starting');
+  try {
+    final plugin = await _setupNotifications();
+    debugPrint('[CDM] Got plugin instance, calling show()');
+    await plugin.show(
+      appeared ? _notifAppearedId : _notifDisappearedId,
+      appeared ? "Poggi c'è" : 'Poggi è andato via',
+      null,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _notifChannelId,
+          _notifChannelName,
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
       ),
-    ),
-  );
+    );
+    debugPrint('[CDM] plugin.show() completed (appeared: $appeared)');
+  } catch (error, stack) {
+    debugPrint('[CDM] ERROR showing notification (appeared: $appeared): $error');
+    debugPrint('$stack');
+  }
+}
+
+Future<void> _handleBackgroundEvent(Map<String, dynamic> event) async {
+  final type = event['type'] as String?;
+  debugPrint('[CDM Background Callback] Handling event type=$type');
+  try {
+    switch (type) {
+      case 'device_appeared':
+        await _showPresenceNotification(appeared: true);
+        break;
+      case 'device_disappeared':
+        await _showPresenceNotification(appeared: false);
+        break;
+    }
+    debugPrint('[CDM Background Callback] Finished handling event type=$type');
+  } catch (error, stack) {
+    debugPrint('[CDM Background Callback] ERROR handling event type=$type: $error');
+    debugPrint('$stack');
+  }
 }
 
 void main() {
@@ -62,21 +100,31 @@ Future<void> companionDeviceWakeCallback() async {
   DartPluginRegistrant.ensureInitialized();
 
   final timestamp = DateTime.now();
-  final isoTime = timestamp.toIso8601String();
-  debugPrint('[CDM Background Callback] Invoked at $isoTime (${timestamp.millisecondsSinceEpoch}ms)');
+  debugPrint(
+    '[CDM Background Callback] Engine started at ${timestamp.toIso8601String()}',
+  );
 
-  final manager = CompanionDeviceManager();
-  final lastEvent = await manager.getLastBackgroundEvent();
-  if (lastEvent != null) {
-    debugPrint('[CDM Background Callback] Last background event: ${lastEvent.type} at ${lastEvent.timestamp}');
-    switch (lastEvent.type) {
-      case 'device_appeared':
-        await _showPresenceNotification(appeared: true);
-        break;
-      case 'device_disappeared':
-        await _showPresenceNotification(appeared: false);
-        break;
+  // Initialise the notification plugin once, up front, so the per-event path
+  // is just a `show()` call.
+  await _setupNotifications();
+
+  // The native dispatcher invokes `onEvent` once per CDM presence change. The
+  // payload mirrors the EventChannel one, so we can re-use the same handler.
+  _backgroundDispatchChannel.setMethodCallHandler((call) async {
+    if (call.method == 'onEvent') {
+      final raw = call.arguments;
+      if (raw is Map) {
+        await _handleBackgroundEvent(raw.cast<String, dynamic>());
+      }
     }
+  });
+
+  // Tell the native side we're ready. This flushes any events that arrived
+  // while the engine was still booting.
+  try {
+    await _backgroundDispatchChannel.invokeMethod<void>('ready');
+  } catch (error) {
+    debugPrint('[CDM Background Callback] ready handshake failed: $error');
   }
 }
 
@@ -313,6 +361,19 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
 
 
   Future<void> _associate() async {
+    if (_associations.isNotEmpty) {
+      final existing = _associations.first;
+      _showSnackBar(
+        'Remove the existing association (${existing.macAddress ?? 'unknown'}) first.',
+      );
+      setState(() {
+        _status =
+            'Cannot create a new association: one already exists for ${existing.macAddress ?? 'unknown'}. '
+            'Tap "Remove" on it first, then try again.';
+      });
+      return;
+    }
+
     final address = _addressController.text.trim();
     final hasAddress = address.isNotEmpty;
 
@@ -345,7 +406,11 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
       _showSnackBar('Association completed.');
     } on PlatformException catch (error) {
       if (!mounted) return;
-      setState(() => _status = 'Association failed: ${error.message}');
+      final message = error.code == 'already_associated'
+          ? 'An association already exists. Remove it first, then try again.'
+          : 'Association failed: ${error.message}';
+      setState(() => _status = message);
+      _showSnackBar(message);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -432,8 +497,18 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (_associations.isNotEmpty) ...[
+                  Text(
+                    'You already have ${_associations.length} association(s). '
+                    'This app pairs one device at a time — remove the existing '
+                    'one below before starting a new association.',
+                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 TextField(
                   controller: _addressController,
+                  enabled: _associations.isEmpty,
                   decoration: const InputDecoration(
                     labelText: 'Bluetooth MAC address (optional)',
                     helperText:
@@ -445,7 +520,7 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
                 ),
                 const SizedBox(height: 12),
                 FilledButton(
-                  onPressed: _busy ? null : _associate,
+                  onPressed: (_busy || _associations.isNotEmpty) ? null : _associate,
                   child: const Text('Start association'),
                 ),
               ],

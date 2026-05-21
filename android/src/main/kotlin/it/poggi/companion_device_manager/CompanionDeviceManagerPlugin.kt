@@ -7,8 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentSender
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.companion.AssociationRequest
 import android.companion.BluetoothDeviceFilter
@@ -34,7 +32,6 @@ class CompanionDeviceManagerPlugin :
     private var activityBinding: ActivityPluginBinding? = null
     private lateinit var channel: MethodChannel
     private lateinit var eventsChannel: EventChannel
-    private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingAssociationResult: Result? = null
     private var pendingAssociationRequest: AssociationRequest? = null
     private var pendingAssociationDisplayName: String? = null
@@ -56,6 +53,22 @@ class CompanionDeviceManagerPlugin :
                 }
             },
         )
+
+        if (CompanionDeviceBackgroundDispatcher.isBackgroundContext) {
+            // Background engine: the main engine has already taken care of any
+            // cleanup and observation start. We just need the channel handlers
+            // attached above so the headless callback can reach native methods.
+            return
+        }
+
+        // Foreground / UI engine: dump the current association state, prune
+        // any stale duplicates we accumulated across previous sessions, and
+        // re-arm presence observation if a background callback is registered.
+        logAssociationState("onAttachedToEngine")
+        val pruned = pruneDuplicateAssociations()
+        if (pruned > 0) {
+            logAssociationState("after auto-prune on attach")
+        }
 
         if (CompanionDeviceStorage.getBackgroundCallbackHandle(applicationContext) != null) {
             startObservingPresenceForCurrentAssociations()
@@ -116,27 +129,123 @@ class CompanionDeviceManagerPlugin :
         return context.getSystemService(CompanionDeviceManager::class.java)
     }
 
+    /**
+     * Returns the system's current associations, deduplicated by MAC address.
+     * Uses the AssociationInfo API on Tiramisu+ (full id / name / profile),
+     * falls back to the address-only legacy API on older releases.
+     */
     private fun readAssociations(): List<Map<String, Any?>> {
         if (!isCompanionDeviceManagerAvailable()) {
             Log.w(tag, "CDM not available on this device")
             return emptyList()
         }
 
-        return getManager().associations.map { address ->
-            Log.d(tag, "Found association: $address")
-            mapOf<String, Any?>(
-                "associationId" to null,
-                "macAddress" to address,
-                "displayName" to null,
-                "deviceProfile" to null,
-                "selfManaged" to false,
-                "lastTimeConnectedMs" to null,
-            )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return readMyAssociations()
+                .distinctBy { it.deviceMacAddress?.toString()?.lowercase() ?: it.id.toString() }
+                .map { it.toMap() }
         }
+
+        return getManager().associations
+            .distinctBy { it.lowercase() }
+            .map { address ->
+                mapOf<String, Any?>(
+                    "associationId" to null,
+                    "macAddress" to address,
+                    "displayName" to null,
+                    "deviceProfile" to null,
+                    "selfManaged" to false,
+                    "lastTimeConnectedMs" to null,
+                )
+            }
+    }
+
+    private fun AssociationInfo.toMap(): Map<String, Any?> = mapOf(
+        "associationId" to id,
+        "macAddress" to deviceMacAddress?.toString(),
+        "displayName" to displayName?.toString(),
+        "deviceProfile" to deviceProfile,
+        "selfManaged" to isSelfManaged,
+        "lastTimeConnectedMs" to null,
+    )
+
+    /**
+     * Prints a clearly demarcated snapshot of the current association state.
+     * Use a recognisable banner so it pops out in `adb logcat`.
+     */
+    private fun logAssociationState(reason: String) {
+        Log.i(tag, "============================================================")
+        Log.i(tag, "[CDM] Association state ($reason)")
+        if (!isCompanionDeviceManagerAvailable()) {
+            Log.i(tag, "  CDM not available on this Android version")
+            Log.i(tag, "============================================================")
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val mine = readMyAssociations()
+            if (mine.isEmpty()) {
+                Log.i(tag, "  No associations registered for this app")
+            } else {
+                Log.i(tag, "  ${mine.size} association(s) registered:")
+                mine.forEach { assoc ->
+                    Log.i(tag, "    - id=${assoc.id} mac=${assoc.deviceMacAddress} name=${assoc.displayName} selfManaged=${assoc.isSelfManaged}")
+                }
+            }
+        } else {
+            val raw = getManager().associations
+            if (raw.isEmpty()) {
+                Log.i(tag, "  No associations registered (legacy API)")
+            } else {
+                Log.i(tag, "  ${raw.size} association(s) registered (legacy API, MAC only):")
+                raw.forEach { Log.i(tag, "    - mac=$it") }
+            }
+        }
+        Log.i(tag, "============================================================")
+    }
+
+    /**
+     * Removes redundant associations that point at the same physical MAC,
+     * keeping only the most recently approved one. Returns the number of
+     * entries removed. Safe no-op on older Android versions where we have no
+     * way of disambiguating two associations sharing a MAC.
+     */
+    private fun pruneDuplicateAssociations(): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return 0
+
+        val mine = readMyAssociations()
+        if (mine.size <= 1) return 0
+
+        val grouped = mine.groupBy { it.deviceMacAddress?.toString()?.lowercase() ?: "<no-mac>:${it.id}" }
+        var removed = 0
+        grouped.forEach { (mac, group) ->
+            if (group.size <= 1) return@forEach
+
+            // The system assigns association ids monotonically, so the highest
+            // id is the most recently approved entry. Keep that one, drop the
+            // rest. (We can't use getTimeApprovedMs() - it's @hide.)
+            val keep = group.maxByOrNull { it.id } ?: group.last()
+            val toDrop = group.filter { it.id != keep.id }
+            Log.w(tag, "Detected ${group.size} duplicate associations for mac=$mac, keeping id=${keep.id}")
+            toDrop.forEach { stale ->
+                Log.w(tag, "  Removing duplicate associationId=${stale.id} mac=${stale.deviceMacAddress}")
+                runCatching {
+                    getManager().disassociate(stale.id)
+                }.onSuccess {
+                    removed++
+                }.onFailure { error ->
+                    Log.e(tag, "  Failed to remove duplicate id=${stale.id}", error)
+                }
+            }
+        }
+        if (removed > 0) {
+            Log.i(tag, "Auto-prune removed $removed duplicate association(s)")
+        }
+        return removed
     }
 
     private fun startAssociation(call: MethodCall, result: Result) {
         Log.d(tag, "startAssociation called")
+        logAssociationState("startAssociation entry")
         if (!isCompanionDeviceManagerAvailable()) {
             result.error("cdm_unavailable", "Companion Device Manager is only available on Android 8.0 (API 26) or newer.", null)
             return
@@ -150,6 +259,25 @@ class CompanionDeviceManagerPlugin :
 
         if (pendingAssociationResult != null) {
             result.error("association_in_progress", "A companion device association is already in progress.", null)
+            return
+        }
+
+        // Single-association contract: this app pairs exactly one device at a
+        // time. If anything is already on file, the caller has to remove it
+        // via disassociate() before requesting a new association. We do not
+        // silently reuse the existing entry - the caller must consciously
+        // confirm they want to replace it.
+        val existing = readAssociations()
+        if (existing.isNotEmpty()) {
+            val macs = existing.mapNotNull { it["macAddress"] as? String }
+            Log.w(tag, "Rejecting associate(): ${existing.size} association(s) already registered: $macs. Caller must disassociate first.")
+            result.error(
+                "already_associated",
+                "An association already exists (mac=${macs.firstOrNull() ?: "?"}). Remove it via disassociate() before requesting a new one.",
+                mapOf<String, Any?>(
+                    "existingAssociations" to existing,
+                ),
+            )
             return
         }
 
@@ -209,15 +337,23 @@ class CompanionDeviceManagerPlugin :
         Log.d(tag, "handleActivityResult for association requestCode=$requestCode resultCode=$resultCode")
 
         val pendingResult = pendingAssociationResult ?: return true
-        val manager = applicationContext?.getSystemService(CompanionDeviceManager::class.java)
 
         if (resultCode == Activity.RESULT_OK) {
+            logAssociationState("association_chooser returned RESULT_OK, before prune")
+
+            // The user just confirmed a new association in the chooser. Strip
+            // out any older associations that share the same MAC as the new
+            // one - those are the entries that would otherwise cause double
+            // onDeviceAppeared/onDeviceDisappeared callbacks per physical event.
+            pruneDuplicateAssociations()
+
             val associations = readAssociations()
-            Log.d(tag, "Association successful, ${associations.size} total associations now known to system")
+            Log.d(tag, "Association successful, ${associations.size} association(s) now known to system")
             associations.forEach { assoc ->
-                Log.d(tag, "  - Association: mac=${assoc["macAddress"]}")
+                Log.d(tag, "  - Association: id=${assoc["associationId"]} mac=${assoc["macAddress"]}")
             }
-            val association = associations.firstOrNull { it["macAddress"] == pendingAssociationMacAddress }
+            val requestedMac = pendingAssociationMacAddress?.lowercase()
+            val association = associations.firstOrNull { (it["macAddress"] as? String)?.lowercase() == requestedMac }
                 ?: associations.firstOrNull()
             val response = association ?: mapOf<String, Any?>(
                 "associationId" to null,
@@ -229,29 +365,18 @@ class CompanionDeviceManagerPlugin :
             )
             startObservingPresenceForCurrentAssociations()
             pendingResult.success(response)
-            CompanionDeviceStorage.persistEvent(
-                applicationContext,
-                mapOf(
-                    "type" to "association_created",
-                    "timestampMs" to System.currentTimeMillis(),
-                    "association" to response,
-                    "rawPayload" to mapOf<String, Any?>(
-                        "resultCode" to resultCode,
-                        "requestCode" to requestCode,
-                    ),
+            val createdEvent = mapOf<String, Any?>(
+                "type" to "association_created",
+                "timestampMs" to System.currentTimeMillis(),
+                "association" to response,
+                "rawPayload" to mapOf<String, Any?>(
+                    "resultCode" to resultCode,
+                    "requestCode" to requestCode,
                 ),
             )
-            CompanionDeviceEventStream.emit(
-                mapOf(
-                    "type" to "association_created",
-                    "timestampMs" to System.currentTimeMillis(),
-                    "association" to response,
-                    "rawPayload" to mapOf<String, Any?>(
-                        "resultCode" to resultCode,
-                        "requestCode" to requestCode,
-                    ),
-                ),
-            )
+            CompanionDeviceStorage.persistEvent(applicationContext, createdEvent)
+            CompanionDeviceEventStream.emit(createdEvent)
+            logAssociationState("association_chooser RESULT_OK, after prune")
         } else {
             finishPendingAssociationError(
                 "association_cancelled",
@@ -359,8 +484,28 @@ class CompanionDeviceManagerPlugin :
             return
         }
 
+        Log.i(tag, "disassociate requested for mac=$address")
         try {
-            getManager().disassociate(address)
+            val manager = getManager()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Disassociate every association we hold for this MAC. The
+                // legacy disassociate(mac) overload only removes the first
+                // match, which would leave stale duplicates behind.
+                val matching = readMyAssociations().filter {
+                    it.deviceMacAddress?.toString()?.equals(address, ignoreCase = true) == true
+                }
+                if (matching.isEmpty()) {
+                    Log.w(tag, "  No associations found for mac=$address")
+                } else {
+                    matching.forEach { assoc ->
+                        Log.i(tag, "  Disassociating id=${assoc.id} mac=${assoc.deviceMacAddress}")
+                        manager.disassociate(assoc.id)
+                    }
+                }
+            } else {
+                manager.disassociate(address)
+            }
+            logAssociationState("after disassociate(mac=$address)")
             result.success(null)
         } catch (exception: Throwable) {
             result.error("disassociate_failed", exception.message, null)
@@ -376,6 +521,7 @@ class CompanionDeviceManagerPlugin :
 
         Log.d(tag, "Registering background callback handle=$handle")
         CompanionDeviceStorage.storeBackgroundCallbackHandle(applicationContext, handle)
+        logAssociationState("registerBackgroundCallback")
         startObservingPresenceForCurrentAssociations()
         result.success(null)
     }
@@ -384,6 +530,7 @@ class CompanionDeviceManagerPlugin :
         Log.d(tag, "Clearing background callback")
         stopObservingPresenceForCurrentAssociations()
         CompanionDeviceStorage.clearBackgroundCallbackHandle(applicationContext)
+        CompanionDeviceBackgroundDispatcher.shutdown()
         result.success(null)
     }
 
