@@ -18,29 +18,28 @@ class CompanionDeviceManager {
     return CompanionDeviceManagerPlatform.instance.associate(request);
   }
 
+  Future<CompanionDeviceAssociation> associateByMacAddress(String macAddress) {
+    return CompanionDeviceManagerPlatform.instance.associateByMacAddress(
+      macAddress,
+    );
+  }
+
   Future<void> disassociate(CompanionDeviceAssociation association) {
     return CompanionDeviceManagerPlatform.instance.disassociate(association);
   }
 
-  /// Registers a top-level / static Dart callback that is invoked in a fresh
-  /// headless FlutterEngine when the system reports a companion-device
-  /// presence change. The callback must be annotated with
-  /// `@pragma('vm:entry-point')`.
-  ///
-  /// Because it runs in a headless engine, the callback body MUST start with
-  ///
-  /// ```dart
-  /// WidgetsFlutterBinding.ensureInitialized();
-  /// DartPluginRegistrant.ensureInitialized();
-  /// ```
-  ///
-  /// before invoking any `MethodChannel`-backed API, otherwise
-  /// `ServicesBinding.instance` is not available and the call throws
-  /// "Binding has not yet been initialized".
+  Future<void> disassociateByMacAddress(String macAddress) {
+    return CompanionDeviceManagerPlatform.instance.disassociateByMacAddress(
+      macAddress,
+    );
+  }
+
   Future<void> registerBackgroundCallback(
     CompanionDeviceBackgroundCallback callback,
   ) {
-    return CompanionDeviceManagerPlatform.instance.registerBackgroundCallback(callback);
+    return CompanionDeviceManagerPlatform.instance.registerBackgroundCallback(
+      callback,
+    );
   }
 
   Future<void> clearBackgroundCallback() {
@@ -55,5 +54,3 @@ class CompanionDeviceManager {
     return CompanionDeviceManagerPlatform.instance.backgroundEvents;
   }
 }
-
-

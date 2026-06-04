@@ -6,16 +6,22 @@ import io.flutter.plugin.common.EventChannel
 
 internal object CompanionDeviceEventStream {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var sinkOwner: Any? = null
     private var eventSink: EventChannel.EventSink? = null
 
-    fun attachSink(sink: EventChannel.EventSink) {
+    fun attachSink(owner: Any, sink: EventChannel.EventSink) {
         mainHandler.post {
+            sinkOwner = owner
             eventSink = sink
         }
     }
 
-    fun detachSink() {
+    fun detachSink(owner: Any) {
         mainHandler.post {
+            if (sinkOwner != owner) {
+                return@post
+            }
+            sinkOwner = null
             eventSink = null
         }
     }

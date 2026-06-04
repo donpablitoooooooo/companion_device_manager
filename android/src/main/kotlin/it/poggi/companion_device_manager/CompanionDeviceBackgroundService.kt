@@ -2,10 +2,24 @@ package it.poggi.companion_device_manager
 
 import android.companion.AssociationInfo
 import android.companion.CompanionDeviceService
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.dart.DartExecutor
+import io.flutter.embedding.engine.loader.FlutterLoader
+import io.flutter.view.FlutterCallbackInformation
+import io.flutter.FlutterInjector
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
 
 class CompanionDeviceBackgroundService : CompanionDeviceService() {
     private val tag = "CDMBackgroundService"
+    private var activeEngine: FlutterEngine? = null
+    private var backgroundChannel: MethodChannel? = null
+    private var pendingEventPayload: Map<String, Any?>? = null
+    private var pendingCallbackHandle: Long? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -23,12 +37,6 @@ class CompanionDeviceBackgroundService : CompanionDeviceService() {
     }
 
     private fun handleDeviceEvent(type: String, associationInfo: AssociationInfo) {
-        val mac = associationInfo.deviceMacAddress?.toString()?.lowercase()
-        if (mac != null && isDuplicate(mac, type)) {
-            Log.d(tag, "Skipping duplicate event type=$type mac=$mac (within ${DEDUPE_WINDOW_MS}ms)")
-            return
-        }
-
         val context = applicationContext
         val payload = mapOf<String, Any?>(
             "type" to type,
@@ -51,44 +59,111 @@ class CompanionDeviceBackgroundService : CompanionDeviceService() {
         Log.d(tag, "Persisted and emitted event type=$type")
 
         val callbackHandle = CompanionDeviceStorage.getBackgroundCallbackHandle(context)
+        val dispatcherHandle = CompanionDeviceStorage.getBackgroundDispatcherHandle(context)
         if (callbackHandle == null) {
             Log.w(tag, "No registered background callback handle; event will not execute Dart callback")
             return
         }
-        Log.d(tag, "Dispatching to background engine, callbackHandle=$callbackHandle")
-        CompanionDeviceBackgroundDispatcher.dispatchEvent(context, callbackHandle, payload)
+        if (dispatcherHandle == null) {
+            Log.e(tag, "Missing background dispatcher handle. Re-register callback from Dart.")
+            return
+        }
+
+        Log.d(tag, "Found registered callback handle=$callbackHandle dispatcherHandle=$dispatcherHandle")
+        runOnMainThread {
+            startBackgroundCallbackEngine(context, dispatcherHandle, callbackHandle, payload)
+        }
+    }
+
+    private fun runOnMainThread(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+        } else {
+            Handler(Looper.getMainLooper()).post(block)
+        }
+    }
+
+    private fun startBackgroundCallbackEngine(
+        context: Context,
+        dispatcherHandle: Long,
+        callbackHandle: Long,
+        eventPayload: Map<String, Any?>,
+    ) {
+        activeEngine?.destroy()
+        activeEngine = null
+        backgroundChannel = null
+
+        pendingEventPayload = eventPayload
+        pendingCallbackHandle = callbackHandle
+
+        val callbackInfo = FlutterCallbackInformation.lookupCallbackInformation(dispatcherHandle)
+            ?: run {
+                Log.e(tag, "Unable to resolve Flutter callback info for dispatcherHandle=$dispatcherHandle")
+                return
+            }
+
+        val flutterLoader: FlutterLoader = FlutterInjector.instance().flutterLoader()
+        flutterLoader.startInitialization(context)
+        flutterLoader.ensureInitializationComplete(context, null)
+
+        val engine = FlutterEngine(context)
+        activeEngine = engine
+
+        val channel = MethodChannel(engine.dartExecutor.binaryMessenger, BACKGROUND_CHANNEL_NAME)
+        backgroundChannel = channel
+        channel.setMethodCallHandler { call: MethodCall, result: MethodChannel.Result ->
+            if (call.method == "backgroundDispatcherInitialized") {
+                dispatchPendingEventToDart()
+                result.success(null)
+            } else {
+                result.notImplemented()
+            }
+        }
+
+
+        val dartCallback = DartExecutor.DartCallback(
+            context.assets,
+            flutterLoader.findAppBundlePath(),
+            callbackInfo,
+        )
+        engine.dartExecutor.executeDartCallback(dartCallback)
+        Log.d(tag, "Executed Dart background dispatcher callback")
+    }
+
+    private fun dispatchPendingEventToDart() {
+        val channel = backgroundChannel
+        val eventPayload = pendingEventPayload
+        val callbackHandle = pendingCallbackHandle
+        if (channel == null || eventPayload == null || callbackHandle == null) {
+            Log.w(tag, "Skipping event dispatch because payload, handle, or channel is missing")
+            return
+        }
+
+        channel.invokeMethod(
+            "dispatchBackgroundEvent",
+            mapOf<String, Any?>(
+                "event" to eventPayload,
+                "callbackHandle" to callbackHandle,
+            ),
+        )
+        pendingEventPayload = null
+        pendingCallbackHandle = null
+        Log.d(tag, "Delivered background event payload to Dart dispatcher")
     }
 
     override fun onDestroy() {
+        backgroundChannel?.setMethodCallHandler(null)
+        backgroundChannel = null
+        pendingEventPayload = null
+        pendingCallbackHandle = null
+        activeEngine?.destroy()
+        activeEngine = null
         Log.d(tag, "Service onDestroy called")
         super.onDestroy()
-        // NOTE: do NOT tear down the dispatcher here. The system can recreate
-        // this service for the next event, but the dispatcher's FlutterEngine
-        // is a process-level singleton we want to keep alive across rebinds.
     }
 
     companion object {
-        private const val DEDUPE_WINDOW_MS = 5_000L
-
-        // The system may have multiple CDM associations for the same physical
-        // device (e.g. the user re-associated without removing the previous
-        // entry). Each association fires its own onDeviceAppeared /
-        // onDeviceDisappeared callback, which causes flutter_local_notifications
-        // to receive two `notify()` calls in quick succession against the same
-        // notification id - the second one quietly updates the first and
-        // suppresses the heads-up. Collapse those duplicates by tracking the
-        // last (mac, type) we forwarded and skipping anything that arrives
-        // within DEDUPE_WINDOW_MS for the same pair.
-        //
-        // Static because the service instance can be torn down between events.
-        private val lastEventByMac = mutableMapOf<String, Pair<String, Long>>()
-
-        private fun isDuplicate(mac: String, type: String): Boolean = synchronized(lastEventByMac) {
-            val now = System.currentTimeMillis()
-            val last = lastEventByMac[mac]
-            val duplicate = last != null && last.first == type && (now - last.second) < DEDUPE_WINDOW_MS
-            if (!duplicate) lastEventByMac[mac] = type to now
-            duplicate
-        }
+        private const val BACKGROUND_CHANNEL_NAME = "companion_device_manager/background"
     }
 }
+

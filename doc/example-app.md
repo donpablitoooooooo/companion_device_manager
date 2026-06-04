@@ -6,6 +6,7 @@ The example app shows how to use the plugin from Flutter and demonstrates the tw
 
 1. launching the association chooser
 2. registering a background callback that is woken by the Android companion service
+3. consuming typed callback payload data (`CompanionDeviceEventType` + MAC address)
 
 ## What the example demonstrates
 
@@ -23,8 +24,7 @@ The example UI contains:
 
 1. Run the example on a real Android device.
 2. Register the background callback.
-3. Optionally enter a target Bluetooth address — leave the field empty to scan
-   all nearby BLE devices and pick one from the system chooser.
+3. Enter a valid companion device Bluetooth address.
 4. Start the association flow.
 5. Complete the system chooser.
 6. Trigger the companion device event on the Android side.

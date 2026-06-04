@@ -1,130 +1,36 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
-import 'dart:ui';
+import 'dart:ui' as ui;
 
 import 'package:companion_device_manager/companion_device_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-
-const String _notifChannelId = 'cdm_presence';
-const String _notifChannelName = 'Companion device presence';
-const int _notifAppearedId = 1001;
-const int _notifDisappearedId = 1002;
-
-/// Channel that the native CDM background dispatcher uses to deliver each
-/// presence event to the long-lived background isolate.
-const MethodChannel _backgroundDispatchChannel =
-    MethodChannel('companion_device_manager/background_dispatch');
-
-FlutterLocalNotificationsPlugin? _notificationsPlugin;
-
-Future<FlutterLocalNotificationsPlugin> _setupNotifications() async {
-  final existing = _notificationsPlugin;
-  if (existing != null) return existing;
-
-  final plugin = FlutterLocalNotificationsPlugin();
-  await plugin.initialize(
-    const InitializationSettings(
-      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-    ),
-  );
-  await plugin
-      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-      ?.createNotificationChannel(
-        const AndroidNotificationChannel(
-          _notifChannelId,
-          _notifChannelName,
-          importance: Importance.high,
-        ),
-      );
-  _notificationsPlugin = plugin;
-  return plugin;
-}
-
-Future<void> _showPresenceNotification({required bool appeared}) async {
-  debugPrint('[CDM] _showPresenceNotification(appeared: $appeared) starting');
-  try {
-    final plugin = await _setupNotifications();
-    debugPrint('[CDM] Got plugin instance, calling show()');
-    await plugin.show(
-      appeared ? _notifAppearedId : _notifDisappearedId,
-      appeared ? "Poggi c'è" : 'Poggi è andato via',
-      null,
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _notifChannelId,
-          _notifChannelName,
-          importance: Importance.high,
-          priority: Priority.high,
-        ),
-      ),
-    );
-    debugPrint('[CDM] plugin.show() completed (appeared: $appeared)');
-  } catch (error, stack) {
-    debugPrint('[CDM] ERROR showing notification (appeared: $appeared): $error');
-    debugPrint('$stack');
-  }
-}
-
-Future<void> _handleBackgroundEvent(Map<String, dynamic> event) async {
-  final type = event['type'] as String?;
-  debugPrint('[CDM Background Callback] Handling event type=$type');
-  try {
-    switch (type) {
-      case 'device_appeared':
-        await _showPresenceNotification(appeared: true);
-        break;
-      case 'device_disappeared':
-        await _showPresenceNotification(appeared: false);
-        break;
-    }
-    debugPrint('[CDM Background Callback] Finished handling event type=$type');
-  } catch (error, stack) {
-    debugPrint('[CDM Background Callback] ERROR handling event type=$type: $error');
-    debugPrint('$stack');
-  }
-}
 
 void main() {
   runApp(const CompanionDeviceManagerExampleApp());
 }
 
 @pragma('vm:entry-point')
-Future<void> companionDeviceWakeCallback() async {
-  // The system spins up a headless FlutterEngine to run this callback, so the
-  // Flutter bindings are NOT initialized yet. Initialize them before touching
-  // any MethodChannel-backed API (otherwise ServicesBinding.instance throws).
+Future<void> companionDeviceWakeCallback(CompanionDeviceEvent event) async {
   WidgetsFlutterBinding.ensureInitialized();
-  DartPluginRegistrant.ensureInitialized();
+  ui.DartPluginRegistrant.ensureInitialized();
 
   final timestamp = DateTime.now();
+  final isoTime = timestamp.toIso8601String();
   debugPrint(
-    '[CDM Background Callback] Engine started at ${timestamp.toIso8601String()}',
+    '[CDM Background Callback] Invoked at $isoTime (${timestamp.millisecondsSinceEpoch}ms) '
+    'type=${event.type.wireValue} mac=${event.association?.macAddress}',
   );
 
-  // Initialise the notification plugin once, up front, so the per-event path
-  // is just a `show()` call.
-  await _setupNotifications();
-
-  // The native dispatcher invokes `onEvent` once per CDM presence change. The
-  // payload mirrors the EventChannel one, so we can re-use the same handler.
-  _backgroundDispatchChannel.setMethodCallHandler((call) async {
-    if (call.method == 'onEvent') {
-      final raw = call.arguments;
-      if (raw is Map) {
-        await _handleBackgroundEvent(raw.cast<String, dynamic>());
-      }
-    }
-  });
-
-  // Tell the native side we're ready. This flushes any events that arrived
-  // while the engine was still booting.
-  try {
-    await _backgroundDispatchChannel.invokeMethod<void>('ready');
-  } catch (error) {
-    debugPrint('[CDM Background Callback] ready handshake failed: $error');
+  // Verify this is truly executing in Dart by logging the event
+  final manager = CompanionDeviceManager();
+  final lastEvent = await manager.getLastBackgroundEvent();
+  if (lastEvent != null) {
+    debugPrint(
+      '[CDM Background Callback] Last background event: ${lastEvent.type.wireValue} '
+      'mac=${lastEvent.association?.macAddress} at ${lastEvent.timestamp}',
+    );
   }
 }
 
@@ -136,7 +42,9 @@ class CompanionDeviceManagerExampleApp extends StatelessWidget {
     return MaterialApp(
       title: 'Companion Device Manager Example',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.blue),
-      home: const _InitializeCallbackWrapper(child: CompanionDeviceManagerHomePage()),
+      home: const _InitializeCallbackWrapper(
+        child: CompanionDeviceManagerHomePage(),
+      ),
     );
   }
 }
@@ -151,12 +59,14 @@ class _InitializeCallbackWrapper extends StatefulWidget {
       _InitializeCallbackWrapperState();
 }
 
-class _InitializeCallbackWrapperState extends State<_InitializeCallbackWrapper> {
+class _InitializeCallbackWrapperState
+    extends State<_InitializeCallbackWrapper> {
   @override
   void initState() {
     super.initState();
-    _ensureCallbackRegistered();
-    _ensureNotificationsReady();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _ensureCallbackRegistered();
+    });
   }
 
   Future<void> _ensureCallbackRegistered() async {
@@ -170,14 +80,6 @@ class _InitializeCallbackWrapperState extends State<_InitializeCallbackWrapper> 
     } catch (error) {
       debugPrint('[CDM] Error auto-registering callback: $error');
     }
-  }
-
-  Future<void> _ensureNotificationsReady() async {
-    final plugin = await _setupNotifications();
-    final granted = await plugin
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-        ?.requestNotificationsPermission();
-    debugPrint('[CDM] POST_NOTIFICATIONS granted=$granted');
   }
 
   @override
@@ -194,42 +96,61 @@ class CompanionDeviceManagerHomePage extends StatefulWidget {
       _CompanionDeviceManagerHomePageState();
 }
 
-class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerHomePage> {
+class _CompanionDeviceManagerHomePageState
+    extends State<CompanionDeviceManagerHomePage> {
   final CompanionDeviceManager _manager = CompanionDeviceManager();
-  final TextEditingController _addressController = TextEditingController();
+  final TextEditingController _addressController = TextEditingController(
+    text: 'A7:09:65:57:B7:D6',
+  );
   StreamSubscription<CompanionDeviceEvent>? _eventSubscription;
+  Timer? _timeAgoTicker;
   String? _lastEventSignature;
+  DateTime? _lastEventTimestamp;
 
   bool _available = false;
   bool _callbackRegistered = false;
   bool _busy = false;
   String _status = 'Ready';
   String? _lastEventJson;
-  List<CompanionDeviceAssociation> _associations = <CompanionDeviceAssociation>[];
+  List<CompanionDeviceAssociation> _associations =
+      <CompanionDeviceAssociation>[];
 
-   @override
-   void initState() {
-     super.initState();
-     _refreshAvailability();
-     _refreshAssociations();
-     _refreshLastEvent();
-     _checkCallbackRegistration();
-     _subscribeToBackgroundEvents();
-   }
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _subscribeToBackgroundEvents();
+      _refreshAvailability();
+      _refreshAssociations();
+      _refreshLastEvent();
+      _checkCallbackRegistration();
+    });
 
-   Future<void> _checkCallbackRegistration() async {
-     try {
-       final lastEvent = await _manager.getLastBackgroundEvent();
-       if (!mounted) return;
-       setState(() => _callbackRegistered = lastEvent != null);
-     } catch (_) {
-       // If we can't get last event, assume callback might not be registered
-     }
-   }
+    _timeAgoTicker = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (!mounted || _lastEventTimestamp == null) {
+        return;
+      }
+      setState(() {
+        // Trigger rebuild so the "time ago" subtitle stays current.
+      });
+    });
+  }
+
+  Future<void> _checkCallbackRegistration() async {
+    try {
+      final lastEvent = await _manager.getLastBackgroundEvent();
+      if (!mounted) return;
+      setState(() => _callbackRegistered = lastEvent != null);
+    } catch (_) {
+      // If we can't get last event, assume callback might not be registered
+    }
+  }
 
   @override
   void dispose() {
     _eventSubscription?.cancel();
+    _timeAgoTicker?.cancel();
     _addressController.dispose();
     super.dispose();
   }
@@ -299,7 +220,9 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
       );
     } on PlatformException catch (error) {
       if (!mounted) return;
-      setState(() => _status = 'Unable to load the last event: ${error.message}');
+      setState(
+        () => _status = 'Unable to load the last event: ${error.message}',
+      );
     }
   }
 
@@ -325,7 +248,9 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
       _lastEventSignature = nextSignature;
       if (logIfChanged) {
         developer.log(
-          event == null ? '[CDM] Last background event cleared (null).' : '$logPrefix $prettyJson',
+          event == null
+              ? '[CDM] Last background event cleared (null).'
+              : '$logPrefix $prettyJson',
           name: 'CDMExample',
         );
       }
@@ -333,8 +258,9 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
 
     setState(() {
       _lastEventJson = prettyJson;
+      _lastEventTimestamp = event?.timestamp;
       if (updateStatusOnChange && changed && event != null) {
-        _status = 'New background event received: ${event.type}';
+        _status = 'New background event received: ${event.type.wireValue}';
       }
     });
   }
@@ -349,39 +275,32 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
       developer.log(message, name: 'CDMExample');
       if (!mounted) return;
       setState(() {
-        _lastEventJson = event == null ? null : const JsonEncoder.withIndent('  ').convert(event.toMap());
-        _status = event == null ? 'No background event captured yet.' : 'Last background event logged to console.';
+        _lastEventJson = event == null
+            ? null
+            : const JsonEncoder.withIndent('  ').convert(event.toMap());
+        _lastEventTimestamp = event?.timestamp;
+        _status = event == null
+            ? 'No background event captured yet.'
+            : 'Last background event logged to console.';
       });
     } on PlatformException catch (error) {
       if (!mounted) return;
-      setState(() => _status = 'Unable to log the last event: ${error.message}');
+      setState(
+        () => _status = 'Unable to log the last event: ${error.message}',
+      );
     }
   }
 
-
-
   Future<void> _associate() async {
-    if (_associations.isNotEmpty) {
-      final existing = _associations.first;
-      _showSnackBar(
-        'Remove the existing association (${existing.macAddress ?? 'unknown'}) first.',
-      );
-      setState(() {
-        _status =
-            'Cannot create a new association: one already exists for ${existing.macAddress ?? 'unknown'}. '
-            'Tap "Remove" on it first, then try again.';
-      });
+    final address = _addressController.text.trim();
+    if (address.isEmpty) {
+      setState(() => _status = 'Please enter a Bluetooth MAC address.');
       return;
     }
 
-    final address = _addressController.text.trim();
-    final hasAddress = address.isNotEmpty;
-
     setState(() {
       _busy = true;
-      _status = hasAddress
-          ? 'Launching the Android companion device chooser for $address...'
-          : 'Scanning all nearby BLE devices. Pick yours from the system dialog...';
+      _status = 'Launching the Android companion device chooser...';
     });
 
     try {
@@ -389,28 +308,23 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
         CompanionDeviceAssociationRequest(
           displayName: 'Companion Device Manager Example',
           filters: <CompanionDeviceFilter>[
-            CompanionDeviceFilter.bluetoothLe(
-              address: hasAddress ? address : null,
-            ),
+            CompanionDeviceFilter.bluetoothLe(address: address),
           ],
-          singleDevice: hasAddress,
+          singleDevice: true,
         ),
       );
 
       if (!mounted) return;
       setState(() {
-        _status = 'Association completed for ${association.macAddress ?? 'unknown device'}.';
+        _status =
+            'Association completed for ${association.macAddress ?? 'unknown device'}.';
       });
       await _refreshAssociations();
       await _refreshLastEvent();
       _showSnackBar('Association completed.');
     } on PlatformException catch (error) {
       if (!mounted) return;
-      final message = error.code == 'already_associated'
-          ? 'An association already exists. Remove it first, then try again.'
-          : 'Association failed: ${error.message}';
-      setState(() => _status = message);
-      _showSnackBar(message);
+      setState(() => _status = 'Association failed: ${error.message}');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -421,18 +335,60 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
     try {
       await _manager.disassociate(association);
       if (!mounted) return;
-      setState(() => _status = 'Association removed for ${association.macAddress ?? 'unknown device'}');
+      setState(
+        () => _status =
+            'Association removed for ${association.macAddress ?? 'unknown device'}',
+      );
       await _refreshAssociations();
     } on PlatformException catch (error) {
       if (!mounted) return;
-      setState(() => _status = 'Unable to remove association: ${error.message}');
+      setState(
+        () => _status = 'Unable to remove association: ${error.message}',
+      );
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
   void _showSnackBar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  String? _lastEventSubtitle() {
+    final timestamp = _lastEventTimestamp;
+    if (timestamp == null) {
+      return null;
+    }
+
+    final local = timestamp.toLocal();
+    final formatted =
+        '${_twoDigits(local.day)}/${_twoDigits(local.month)}/${local.year} '
+        '${_twoDigits(local.hour)}:${_twoDigits(local.minute)}:${_twoDigits(local.second)}';
+    return 'Ricevuto: $formatted (${_formatTimeAgo(local, DateTime.now())})';
+  }
+
+  String _twoDigits(int value) => value.toString().padLeft(2, '0');
+
+  String _formatTimeAgo(DateTime timestamp, DateTime now) {
+    final difference = now.difference(timestamp);
+    if (difference.isNegative || difference.inSeconds < 5) {
+      return 'adesso';
+    }
+    if (difference.inMinutes < 1) {
+      return '${difference.inSeconds}s fa';
+    }
+    if (difference.inHours < 1) {
+      final minutes = difference.inMinutes;
+      return minutes == 1 ? '1 min fa' : '$minutes min fa';
+    }
+    if (difference.inDays < 1) {
+      final hours = difference.inHours;
+      return hours == 1 ? '1 ora fa' : '$hours ore fa';
+    }
+    final days = difference.inDays;
+    return days == 1 ? '1 giorno fa' : '$days giorni fa';
   }
 
   @override
@@ -457,70 +413,56 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: <Widget>[
-          _InfoCard(
-            title: 'Status',
-            child: Text(_status),
-          ),
+          _InfoCard(title: 'Status', child: Text(_status)),
           const SizedBox(height: 12),
           _InfoCard(
             title: 'Runtime availability',
             child: Text(_available ? 'Available' : 'Not available'),
           ),
           const SizedBox(height: 12),
-           _InfoCard(
-             title: 'Background callback',
-             child: Column(
-               crossAxisAlignment: CrossAxisAlignment.start,
-               children: [
-                 Text(_callbackRegistered ? 'Registered (auto)' : 'Not registered'),
-                 const SizedBox(height: 12),
-                 Wrap(
-                   spacing: 12,
-                   runSpacing: 12,
-                   children: [
-                     OutlinedButton(
-                       onPressed: _busy ? null : _refreshLastEvent,
-                       child: const Text('Reload last event'),
-                     ),
-                     OutlinedButton(
-                       onPressed: _busy ? null : _logLastEvent,
-                       child: const Text('Log last event'),
-                     ),
-                   ],
-                 ),
-               ],
-             ),
-           ),
+          _InfoCard(
+            title: 'Background callback',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _callbackRegistered ? 'Registered (auto)' : 'Not registered',
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
+                  children: [
+                    OutlinedButton(
+                      onPressed: _busy ? null : _refreshLastEvent,
+                      child: const Text('Reload last event'),
+                    ),
+                    OutlinedButton(
+                      onPressed: _busy ? null : _logLastEvent,
+                      child: const Text('Log last event'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
           const SizedBox(height: 12),
           _InfoCard(
             title: 'Association setup',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (_associations.isNotEmpty) ...[
-                  Text(
-                    'You already have ${_associations.length} association(s). '
-                    'This app pairs one device at a time — remove the existing '
-                    'one below before starting a new association.',
-                    style: TextStyle(color: Theme.of(context).colorScheme.error),
-                  ),
-                  const SizedBox(height: 12),
-                ],
                 TextField(
                   controller: _addressController,
-                  enabled: _associations.isEmpty,
                   decoration: const InputDecoration(
-                    labelText: 'Bluetooth MAC address (optional)',
-                    helperText:
-                        'Leave empty to scan all nearby BLE devices and pick one '
-                        'from the system chooser.',
-                    helperMaxLines: 2,
+                    labelText: 'Bluetooth MAC address',
+                    helperText: 'Use the BLE device MAC address when testing.',
                     border: OutlineInputBorder(),
                   ),
                 ),
                 const SizedBox(height: 12),
                 FilledButton(
-                  onPressed: (_busy || _associations.isNotEmpty) ? null : _associate,
+                  onPressed: _busy ? null : _associate,
                   child: const Text('Start association'),
                 ),
               ],
@@ -536,14 +478,20 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
                         .map(
                           (association) => ListTile(
                             contentPadding: EdgeInsets.zero,
-                            title: Text(association.displayName ?? association.macAddress ?? 'Unknown device'),
+                            title: Text(
+                              association.displayName ??
+                                  association.macAddress ??
+                                  'Unknown device',
+                            ),
                             subtitle: Text(
                               'MAC: ${association.macAddress ?? 'n/a'}\n'
                               'Association ID: ${association.associationId?.toString() ?? 'n/a'}',
                             ),
                             isThreeLine: true,
                             trailing: TextButton(
-                              onPressed: _busy ? null : () => _disassociate(association),
+                              onPressed: _busy
+                                  ? null
+                                  : () => _disassociate(association),
                               child: const Text('Remove'),
                             ),
                           ),
@@ -554,19 +502,20 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
           const SizedBox(height: 12),
           _InfoCard(
             title: 'Last background event',
+            subtitle: _lastEventSubtitle(),
             child: SelectableText(
               _lastEventJson ?? 'No background event captured yet.',
             ),
           ),
           const SizedBox(height: 12),
-           const _InfoCard(
-             title: 'Notes',
-             child: Text(
-               'The background callback is auto-registered on app startup and executes with full Dart access, '
-               'even when the app is backgrounded or killed. Device presence events arrive via CompanionDeviceService '
-               'and trigger the callback in a headless Flutter engine with full plugin and storage access.',
-             ),
-           ),
+          const _InfoCard(
+            title: 'Notes',
+            child: Text(
+              'The background callback is auto-registered on app startup and executes with full Dart access, '
+              'even when the app is backgrounded or killed. Device presence events arrive via CompanionDeviceService '
+              'and trigger the callback in a headless Flutter engine with full plugin and storage access.',
+            ),
+          ),
         ],
       ),
     );
@@ -574,9 +523,10 @@ class _CompanionDeviceManagerHomePageState extends State<CompanionDeviceManagerH
 }
 
 class _InfoCard extends StatelessWidget {
-  const _InfoCard({required this.title, required this.child});
+  const _InfoCard({required this.title, required this.child, this.subtitle});
 
   final String title;
+  final String? subtitle;
   final Widget child;
 
   @override
@@ -588,6 +538,10 @@ class _InfoCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(title, style: Theme.of(context).textTheme.titleMedium),
+            if (subtitle != null) ...[
+              const SizedBox(height: 4),
+              Text(subtitle!, style: Theme.of(context).textTheme.bodySmall),
+            ],
             const SizedBox(height: 12),
             child,
           ],
