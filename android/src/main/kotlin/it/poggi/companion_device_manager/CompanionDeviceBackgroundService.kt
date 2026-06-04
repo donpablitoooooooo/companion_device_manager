@@ -96,18 +96,37 @@ class CompanionDeviceBackgroundService : CompanionDeviceService() {
         pendingEventPayload = eventPayload
         pendingCallbackHandle = callbackHandle
 
+        // Load and initialise the Flutter native library BEFORE looking up the
+        // callback. On a cold start (app killed, process spawned only for this
+        // service) libflutter.so isn't loaded yet, and
+        // FlutterCallbackInformation.lookupCallbackInformation() is a native
+        // (JNI) call - invoking it first throws UnsatisfiedLinkError and crashes
+        // the whole process before any notification can be shown.
+        val flutterLoader: FlutterLoader = FlutterInjector.instance().flutterLoader()
+        flutterLoader.startInitialization(context)
+        flutterLoader.ensureInitializationComplete(context, null)
+
         val callbackInfo = FlutterCallbackInformation.lookupCallbackInformation(dispatcherHandle)
             ?: run {
                 Log.e(tag, "Unable to resolve Flutter callback info for dispatcherHandle=$dispatcherHandle")
                 return
             }
 
-        val flutterLoader: FlutterLoader = FlutterInjector.instance().flutterLoader()
-        flutterLoader.startInitialization(context)
-        flutterLoader.ensureInitializationComplete(context, null)
-
         val engine = FlutterEngine(context)
         activeEngine = engine
+
+        // Register the app's plugins on this headless engine so the Dart
+        // callback can use them (e.g. flutter_local_notifications) on a cold
+        // start, where nothing else has registered them in this process yet.
+        // Reflection, because the generated registrant lives in the host app,
+        // not in this plugin.
+        runCatching {
+            Class.forName("io.flutter.plugins.GeneratedPluginRegistrant")
+                .getDeclaredMethod("registerWith", FlutterEngine::class.java)
+                .invoke(null, engine)
+        }.onFailure { error ->
+            Log.w(tag, "GeneratedPluginRegistrant unavailable on background engine", error)
+        }
 
         val channel = MethodChannel(engine.dartExecutor.binaryMessenger, BACKGROUND_CHANNEL_NAME)
         backgroundChannel = channel
