@@ -16,10 +16,6 @@ import io.flutter.plugin.common.MethodChannel
 
 class CompanionDeviceBackgroundService : CompanionDeviceService() {
     private val tag = "CDMBackgroundService"
-    private var activeEngine: FlutterEngine? = null
-    private var backgroundChannel: MethodChannel? = null
-    private var pendingEventPayload: Map<String, Any?>? = null
-    private var pendingCallbackHandle: Long? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -69,120 +65,145 @@ class CompanionDeviceBackgroundService : CompanionDeviceService() {
             return
         }
 
-        Log.d(tag, "Found registered callback handle=$callbackHandle dispatcherHandle=$dispatcherHandle")
-        runOnMainThread {
-            startBackgroundCallbackEngine(context, dispatcherHandle, callbackHandle, payload)
-        }
+        Log.d(tag, "Dispatching to persistent background engine, callbackHandle=$callbackHandle dispatcherHandle=$dispatcherHandle")
+        BackgroundEngine.dispatch(context.applicationContext, dispatcherHandle, callbackHandle, payload)
     }
 
-    private fun runOnMainThread(block: () -> Unit) {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            block()
-        } else {
-            Handler(Looper.getMainLooper()).post(block)
-        }
+    override fun onDestroy() {
+        // IMPORTANT: do NOT destroy the FlutterEngine here. The system unbinds
+        // this CompanionDeviceService almost immediately after delivering an
+        // event (see "Unbinding ..." in logcat) and rebinds it for the next
+        // one. Tearing the engine down would kill the Dart callback (e.g.
+        // flutter_local_notifications.show()) mid-flight on a cold start - which
+        // is exactly why the notification never appeared when the app was
+        // killed. The engine is a process-level singleton kept alive in
+        // BackgroundEngine until the callback is cleared or the process dies.
+        Log.d(tag, "Service onDestroy called (engine kept alive)")
+        super.onDestroy()
     }
+}
 
-    private fun startBackgroundCallbackEngine(
-        context: Context,
+/**
+ * Process-level owner of the headless [FlutterEngine] used to deliver CDM
+ * background events to Dart.
+ *
+ * The engine is created lazily on the first event and kept alive across service
+ * rebinds, so we never tear it down mid-callback. Events are queued until the
+ * Dart dispatcher reports it is ready ("backgroundDispatcherInitialized"), then
+ * delivered one by one through [CHANNEL_NAME] as `dispatchBackgroundEvent`.
+ */
+internal object BackgroundEngine {
+    private const val TAG = "CDMBgEngine"
+    private const val CHANNEL_NAME = "companion_device_manager/background"
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var engine: FlutterEngine? = null
+    private var channel: MethodChannel? = null
+    private var ready = false
+    private var callbackHandle: Long = 0L
+    private val pending = ArrayDeque<Map<String, Any?>>()
+
+    fun dispatch(
+        appContext: Context,
         dispatcherHandle: Long,
         callbackHandle: Long,
-        eventPayload: Map<String, Any?>,
+        payload: Map<String, Any?>,
     ) {
-        activeEngine?.destroy()
-        activeEngine = null
-        backgroundChannel = null
+        runOnMain {
+            this.callbackHandle = callbackHandle
+            when {
+                engine == null -> {
+                    Log.d(TAG, "No engine yet - queueing event and starting persistent engine")
+                    pending.addLast(payload)
+                    start(appContext, dispatcherHandle)
+                }
+                !ready -> {
+                    Log.d(TAG, "Engine starting - queueing event (queue=${pending.size + 1})")
+                    pending.addLast(payload)
+                }
+                else -> send(payload)
+            }
+        }
+    }
 
-        pendingEventPayload = eventPayload
-        pendingCallbackHandle = callbackHandle
+    /** Tears down the engine. Called when the registered callback is cleared. */
+    fun shutdown() {
+        runOnMain {
+            channel?.setMethodCallHandler(null)
+            channel = null
+            engine?.destroy()
+            engine = null
+            ready = false
+            pending.clear()
+            Log.d(TAG, "Persistent background engine shut down")
+        }
+    }
 
-        // Load and initialise the Flutter native library BEFORE looking up the
-        // callback. On a cold start (app killed, process spawned only for this
-        // service) libflutter.so isn't loaded yet, and
-        // FlutterCallbackInformation.lookupCallbackInformation() is a native
-        // (JNI) call - invoking it first throws UnsatisfiedLinkError and crashes
-        // the whole process before any notification can be shown.
-        val flutterLoader: FlutterLoader = FlutterInjector.instance().flutterLoader()
-        flutterLoader.startInitialization(context)
-        flutterLoader.ensureInitializationComplete(context, null)
+    private fun start(appContext: Context, dispatcherHandle: Long) {
+        // Load + initialise the Flutter native library BEFORE the JNI callback
+        // lookup. On a cold start libflutter.so is not loaded yet, and
+        // lookupCallbackInformation() is a native call - doing it first throws
+        // UnsatisfiedLinkError and crashes the process.
+        val loader: FlutterLoader = FlutterInjector.instance().flutterLoader()
+        loader.startInitialization(appContext)
+        loader.ensureInitializationComplete(appContext, null)
 
         val callbackInfo = FlutterCallbackInformation.lookupCallbackInformation(dispatcherHandle)
-            ?: run {
-                Log.e(tag, "Unable to resolve Flutter callback info for dispatcherHandle=$dispatcherHandle")
-                return
-            }
+        if (callbackInfo == null) {
+            Log.e(TAG, "Unable to resolve dispatcher callback for handle=$dispatcherHandle; dropping ${pending.size} event(s)")
+            pending.clear()
+            return
+        }
 
-        val engine = FlutterEngine(context)
-        activeEngine = engine
+        val newEngine = FlutterEngine(appContext)
+        engine = newEngine
 
         // Register the app's plugins on this headless engine so the Dart
         // callback can use them (e.g. flutter_local_notifications) on a cold
-        // start, where nothing else has registered them in this process yet.
-        // Reflection, because the generated registrant lives in the host app,
-        // not in this plugin.
+        // start. Reflection, because the generated registrant lives in the host
+        // app, not in this plugin.
         runCatching {
             Class.forName("io.flutter.plugins.GeneratedPluginRegistrant")
                 .getDeclaredMethod("registerWith", FlutterEngine::class.java)
-                .invoke(null, engine)
+                .invoke(null, newEngine)
         }.onFailure { error ->
-            Log.w(tag, "GeneratedPluginRegistrant unavailable on background engine", error)
+            Log.w(TAG, "GeneratedPluginRegistrant unavailable on background engine", error)
         }
 
-        val channel = MethodChannel(engine.dartExecutor.binaryMessenger, BACKGROUND_CHANNEL_NAME)
-        backgroundChannel = channel
-        channel.setMethodCallHandler { call: MethodCall, result: MethodChannel.Result ->
+        val newChannel = MethodChannel(newEngine.dartExecutor.binaryMessenger, CHANNEL_NAME)
+        channel = newChannel
+        newChannel.setMethodCallHandler { call: MethodCall, result: MethodChannel.Result ->
             if (call.method == "backgroundDispatcherInitialized") {
-                dispatchPendingEventToDart()
+                Log.d(TAG, "Dart dispatcher ready - flushing ${pending.size} pending event(s)")
+                ready = true
+                while (pending.isNotEmpty()) {
+                    send(pending.removeFirst())
+                }
                 result.success(null)
             } else {
                 result.notImplemented()
             }
         }
 
-
-        val dartCallback = DartExecutor.DartCallback(
-            context.assets,
-            flutterLoader.findAppBundlePath(),
-            callbackInfo,
+        newEngine.dartExecutor.executeDartCallback(
+            DartExecutor.DartCallback(appContext.assets, loader.findAppBundlePath(), callbackInfo),
         )
-        engine.dartExecutor.executeDartCallback(dartCallback)
-        Log.d(tag, "Executed Dart background dispatcher callback")
+        Log.d(TAG, "Started persistent background engine and executed Dart dispatcher entrypoint")
     }
 
-    private fun dispatchPendingEventToDart() {
-        val channel = backgroundChannel
-        val eventPayload = pendingEventPayload
-        val callbackHandle = pendingCallbackHandle
-        if (channel == null || eventPayload == null || callbackHandle == null) {
-            Log.w(tag, "Skipping event dispatch because payload, handle, or channel is missing")
-            return
-        }
-
-        channel.invokeMethod(
+    private fun send(payload: Map<String, Any?>) {
+        Log.d(TAG, "Dispatching event to Dart: type=${payload["type"]}")
+        channel?.invokeMethod(
             "dispatchBackgroundEvent",
             mapOf<String, Any?>(
-                "event" to eventPayload,
+                "event" to payload,
                 "callbackHandle" to callbackHandle,
             ),
         )
-        pendingEventPayload = null
-        pendingCallbackHandle = null
-        Log.d(tag, "Delivered background event payload to Dart dispatcher")
     }
 
-    override fun onDestroy() {
-        backgroundChannel?.setMethodCallHandler(null)
-        backgroundChannel = null
-        pendingEventPayload = null
-        pendingCallbackHandle = null
-        activeEngine?.destroy()
-        activeEngine = null
-        Log.d(tag, "Service onDestroy called")
-        super.onDestroy()
-    }
-
-    companion object {
-        private const val BACKGROUND_CHANNEL_NAME = "companion_device_manager/background"
+    private fun runOnMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) block()
+        else mainHandler.post(block)
     }
 }
-

@@ -410,6 +410,7 @@ class CompanionDeviceManagerPlugin :
         stopObservingPresenceForCurrentAssociations()
         CompanionDeviceStorage.clearBackgroundCallbackHandle(applicationContext)
         CompanionDeviceStorage.clearBackgroundDispatcherHandle(applicationContext)
+        BackgroundEngine.shutdown()
         result.success(null)
     }
 
