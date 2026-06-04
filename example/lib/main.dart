@@ -44,7 +44,7 @@ Future<void> companionDeviceWakeCallback(CompanionDeviceEvent event) async {
 // Local notifications
 // ---------------------------------------------------------------------------
 
-const String _presenceChannelId = 'cdm_presence';
+const String _presenceChannelId = 'cdm_presence_v2';
 const String _presenceChannelName = 'Presenza companion device';
 const String _presenceChannelDescription =
     'Notifica quando il companion device entra o esce dal raggio Bluetooth.';
@@ -82,6 +82,8 @@ Future<void> _showPresenceNotification(CompanionDeviceEvent event) async {
     importance: Importance.high,
     priority: Priority.high,
     category: AndroidNotificationCategory.status,
+    playSound: true,
+    enableVibration: true,
   );
 
   final String device = event.association?.displayName ??
@@ -119,6 +121,7 @@ Future<void> _initForegroundNotifications() async {
       _presenceChannelName,
       description: _presenceChannelDescription,
       importance: Importance.high,
+      playSound: true,
     ),
   );
   await android?.requestNotificationsPermission();
