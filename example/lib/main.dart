@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:companion_device_manager/companion_device_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 void main() {
   runApp(const CompanionDeviceManagerExampleApp());
@@ -23,6 +24,11 @@ Future<void> companionDeviceWakeCallback(CompanionDeviceEvent event) async {
     'type=${event.type.wireValue} mac=${event.association?.macAddress}',
   );
 
+  // Fire the presence notification first thing, so it goes out even if the
+  // headless engine gets torn down shortly after (the CDM service is only
+  // bound briefly). This is the whole point of the background callback.
+  await _showPresenceNotification(event);
+
   // Verify this is truly executing in Dart by logging the event
   final manager = CompanionDeviceManager();
   final lastEvent = await manager.getLastBackgroundEvent();
@@ -32,6 +38,90 @@ Future<void> companionDeviceWakeCallback(CompanionDeviceEvent event) async {
       'mac=${lastEvent.association?.macAddress} at ${lastEvent.timestamp}',
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Local notifications
+// ---------------------------------------------------------------------------
+
+const String _presenceChannelId = 'cdm_presence';
+const String _presenceChannelName = 'Presenza companion device';
+const String _presenceChannelDescription =
+    'Notifica quando il companion device entra o esce dal raggio Bluetooth.';
+
+/// One plugin instance per isolate. The headless background callback runs in
+/// its own isolate, separate from the UI isolate, so each initialises its own.
+final FlutterLocalNotificationsPlugin _notifications =
+    FlutterLocalNotificationsPlugin();
+
+Future<void> _initNotifications() async {
+  const AndroidInitializationSettings androidInit =
+      AndroidInitializationSettings('@mipmap/ic_launcher');
+  await _notifications.initialize(
+    const InitializationSettings(android: androidInit),
+  );
+}
+
+/// Shows a heads-up notification for a presence event. Called from the headless
+/// background callback, so it must (re)initialise the plugin itself every time.
+Future<void> _showPresenceNotification(CompanionDeviceEvent event) async {
+  final bool appeared = event.type == CompanionDeviceEventType.deviceAppeared;
+  final bool disappeared =
+      event.type == CompanionDeviceEventType.deviceDisappeared;
+  if (!appeared && !disappeared) {
+    // Only presence events produce a notification.
+    return;
+  }
+
+  await _initNotifications();
+
+  const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+    _presenceChannelId,
+    _presenceChannelName,
+    channelDescription: _presenceChannelDescription,
+    importance: Importance.high,
+    priority: Priority.high,
+    category: AndroidNotificationCategory.status,
+  );
+
+  final String device = event.association?.displayName ??
+      event.association?.macAddress ??
+      'Companion device';
+  final String title =
+      appeared ? 'Dispositivo abbinato' : 'Dispositivo disabbinato';
+  final String body = appeared
+      ? '$device è nel raggio Bluetooth'
+      : '$device è uscito dal raggio Bluetooth';
+
+  // Distinct ids so an "appeared" and a "disappeared" don't overwrite one
+  // another in the shade.
+  final int id = appeared ? 1001 : 1002;
+  await _notifications.show(
+    id,
+    title,
+    body,
+    const NotificationDetails(android: androidDetails),
+  );
+  debugPrint('[CDM Background Callback] Shown notification id=$id "$title"');
+}
+
+/// Foreground-only: create the channel and request the Android 13+ runtime
+/// notification permission. The headless isolate can't prompt the user, so we
+/// do it here while the app is in the foreground.
+Future<void> _initForegroundNotifications() async {
+  await _initNotifications();
+  final AndroidFlutterLocalNotificationsPlugin? android =
+      _notifications.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+  await android?.createNotificationChannel(
+    const AndroidNotificationChannel(
+      _presenceChannelId,
+      _presenceChannelName,
+      description: _presenceChannelDescription,
+      importance: Importance.high,
+    ),
+  );
+  await android?.requestNotificationsPermission();
 }
 
 class CompanionDeviceManagerExampleApp extends StatelessWidget {
@@ -65,6 +155,7 @@ class _InitializeCallbackWrapperState
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initForegroundNotifications();
       _ensureCallbackRegistered();
     });
   }
